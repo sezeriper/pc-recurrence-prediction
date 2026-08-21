@@ -100,7 +100,12 @@ uv run pc-image-embed run `
 
 The command dispatches to the same verified ROCm interpreter and has no silent CPU fallback. Use
 `embed` instead of `run` to require an already cached checkpoint. `--patients`, `--run-dir`,
-`--resume`, and `--force` are supported.
+`--resume`, `--force`, and `--centering` are supported.
+
+Both encoders center their crop on the CT volume's geometric center by default. Pass
+`--centering pancreas` to center the crop on the predicted pancreas bounding box instead; window
+sizes are unchanged. The chosen mode and the pancreas/volume center coordinates are recorded in
+every run manifest and per-patient record.
 
 The backends are pinned and save float32 embeddings without L2 normalization:
 

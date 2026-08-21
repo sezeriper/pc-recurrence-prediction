@@ -12,6 +12,7 @@ from .constants import (
     DEFAULT_OUTPUT_ROOT,
     DEFAULT_RUNTIME_PYTHON,
     EXPECTED_GPU_NAME,
+    CenteringMode,
     ImageEncoderName,
 )
 
@@ -45,6 +46,7 @@ def _run(
     model_cache: Path,
     run_dir: Path | None,
     patients: str | None,
+    centering: CenteringMode,
     resume: bool,
     force: bool,
     runtime_python: Path,
@@ -61,6 +63,7 @@ def _run(
         model_cache=model_cache,
         run_dir=run_dir,
         patients=_selected_patients(patients),
+        centering=centering,
         resume=resume,
         force=force,
         local_model_only=local_model_only,
@@ -78,6 +81,10 @@ def embed(
     patients: Annotated[
         str | None, typer.Option(help="Comma-separated patient ROI directory names.")
     ] = None,
+    centering: Annotated[
+        CenteringMode,
+        typer.Option(help="Crop centering: predicted pancreas bbox or CT volume center."),
+    ] = CenteringMode.VOLUME,
     resume: Annotated[bool, typer.Option("--resume/--no-resume")] = True,
     force: Annotated[bool, typer.Option("--force")] = False,
     runtime_python: Annotated[Path, typer.Option()] = DEFAULT_RUNTIME_PYTHON,
@@ -90,6 +97,7 @@ def embed(
         model_cache,
         run_dir,
         patients,
+        centering,
         resume,
         force,
         runtime_python,
@@ -107,6 +115,10 @@ def run_pipeline(
     patients: Annotated[
         str | None, typer.Option(help="Comma-separated patient ROI directory names.")
     ] = None,
+    centering: Annotated[
+        CenteringMode,
+        typer.Option(help="Crop centering: predicted pancreas bbox or CT volume center."),
+    ] = CenteringMode.VOLUME,
     resume: Annotated[bool, typer.Option("--resume/--no-resume")] = True,
     force: Annotated[bool, typer.Option("--force")] = False,
     runtime_python: Annotated[Path, typer.Option()] = DEFAULT_RUNTIME_PYTHON,
@@ -119,6 +131,7 @@ def run_pipeline(
         model_cache,
         run_dir,
         patients,
+        centering,
         resume,
         force,
         runtime_python,

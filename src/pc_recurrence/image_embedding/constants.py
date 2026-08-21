@@ -20,6 +20,11 @@ class ImageEncoderName(StrEnum):
     MERLIN = "merlin"
 
 
+class CenteringMode(StrEnum):
+    PANCREAS = "pancreas"
+    VOLUME = "volume"
+
+
 SPECTRE_REPOSITORY = "cclaess/SPECTRE"
 SPECTRE_REVISION = "b166c0bd4867cdc1d31eda445f2d538572d3dfff"
 SPECTRE_BACKBONE_FILENAME = "spectre_backbone_vit_large_patch16_128.pt"

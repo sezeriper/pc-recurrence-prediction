@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 
 from pc_recurrence.image_embedding import pipeline
-from pc_recurrence.image_embedding.constants import ImageEncoderName
+from pc_recurrence.image_embedding.constants import CenteringMode, ImageEncoderName
 from pc_recurrence.image_embedding.foundation_models import FoundationModelArtifacts, RuntimeInfo
 
 
@@ -93,6 +93,82 @@ def test_foundation_encoders_write_finite_dynamic_embeddings(
     manifest = json.loads((output / "run_manifest.json").read_text(encoding="utf-8"))
     assert manifest["encoder"] == encoder_name.value
     assert manifest["feature_extraction"]["embedding_dimension"] == dimension
+
+
+def test_volume_centering_invalidates_cache_and_records_mode(
+    tmp_path: Path, monkeypatch
+) -> None:
+    roi_run = tmp_path / "roi_run"
+    patient_dir = roi_run / "Patient 4"
+    patient_dir.mkdir(parents=True)
+    (roi_run / "run_manifest.json").write_text(
+        json.dumps({"roi_target": "pancreas"}), encoding="utf-8"
+    )
+    affine = np.diag([2.0, 2.0, 2.5, 1.0])
+    ct = np.full((28, 30, 20), -1000.0, dtype=np.float32)
+    mask = np.zeros_like(ct, dtype=np.uint8)
+    mask[2:6, 22:27, 3:7] = 1
+    nib.save(nib.Nifti1Image(ct, affine), patient_dir / "roi_ct.nii.gz")
+    nib.save(
+        nib.Nifti1Image(mask, affine),
+        patient_dir / "roi_pancreas_mask.nii.gz",
+    )
+    model_file = tmp_path / "spectre.pt"
+    model_file.touch()
+    artifacts = FoundationModelArtifacts(
+        paths=(model_file, model_file), hashes=("A" * 64, "B" * 64)
+    )
+    runtime = RuntimeInfo("test", "test", "test", 0, "test", 1, 1, 0.1, (2, 1080))
+    monkeypatch.setattr(
+        pipeline, "acquire_foundation_model", lambda *_args, **_kwargs: artifacts
+    )
+    monkeypatch.setattr(
+        pipeline, "load_foundation_runtime", lambda *_args: (object(), runtime)
+    )
+    encode_calls: list[str] = []
+
+    def _fake_encode_spectre(model, data, *, expected_grid):
+        encode_calls.append("encoded")
+        return (
+            np.ones((int(np.prod(expected_grid)) + 1, 1080), dtype=np.float32),
+            expected_grid,
+        )
+
+    monkeypatch.setattr(pipeline, "encode_spectre", _fake_encode_spectre)
+
+    run_dir = tmp_path / "embedding_run"
+    first = pipeline.run_embedding(
+        roi_run,
+        tmp_path / "outputs",
+        tmp_path / "models",
+        encoder_name=ImageEncoderName.SPECTRE,
+        run_dir=run_dir,
+        centering=CenteringMode.PANCREAS,
+    )
+    first_manifest = json.loads((first / "run_manifest.json").read_text(encoding="utf-8"))
+    assert first_manifest["preprocessing"]["centering"] == "predicted pancreas bounding-box center"
+
+    second = pipeline.run_embedding(
+        roi_run,
+        tmp_path / "outputs",
+        tmp_path / "models",
+        encoder_name=ImageEncoderName.SPECTRE,
+        run_dir=run_dir,
+        centering=CenteringMode.VOLUME,
+    )
+
+    assert len(encode_calls) == 2  # volume run recomputed despite cached pancreas state
+    second_manifest = json.loads((second / "run_manifest.json").read_text(encoding="utf-8"))
+    assert second_manifest["preprocessing"]["centering"] == "CT volume center"
+    state = json.loads(
+        next((second / ".state").glob("*.json")).read_text(encoding="utf-8")
+    )
+    assert state["centering"] == "volume"
+    assert state["record"]["preprocessing"]["centering"] == "volume"
+    np.testing.assert_allclose(
+        state["record"]["preprocessing"]["crop_center_voxel"],
+        state["record"]["preprocessing"]["volume_center_voxel"],
+    )
 
 
 def test_foundation_encoder_strictly_skips_missing_pancreas_mask(

@@ -15,6 +15,7 @@ from .constants import (
     MERLIN_INPUT_SIZE,
     MERLIN_TARGET_SPACING_MM,
     SPECTRE_CROP_SIZE,
+    CenteringMode,
 )
 
 
@@ -60,6 +61,11 @@ def _mask_bounds(mask: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     return start, stop, center
 
 
+def _volume_center(shape: tuple[int, ...] | np.ndarray) -> np.ndarray:
+    """Geometric center of a volume in voxel coordinates."""
+    return (np.asarray(shape, dtype=np.float64) - 1) / 2.0
+
+
 def centered_crop_or_pad(
     data: np.ndarray,
     center: np.ndarray,
@@ -95,15 +101,21 @@ def prepare_spectre_input(
     mask_image: nib.Nifti1Image,
     *,
     margin_mm: float = ROI_MARGIN_MM,
+    centering: CenteringMode = CenteringMode.VOLUME,
 ) -> FoundationInput:
     data, mask, affine = _validated_arrays(ct_image, mask_image)
-    start, stop, center = _mask_bounds(mask)
+    start, stop, mask_center = _mask_bounds(mask)
     spacing = nib.affines.voxel_sizes(affine)
     margin_voxels = np.ceil(margin_mm / spacing).astype(np.int64)
     required = stop - start + 2 * margin_voxels
     target_shape = tuple(
         max(crop, int(math.ceil(size / crop)) * crop)
         for size, crop in zip(required, SPECTRE_CROP_SIZE, strict=True)
+    )
+    center = (
+        mask_center
+        if centering is CenteringMode.PANCREAS
+        else _volume_center(data.shape)
     )
     cropped, pad_before, pad_after = centered_crop_or_pad(
         data, center, target_shape, fill_value=-1000.0
@@ -127,9 +139,12 @@ def prepare_spectre_input(
             "orientation": "RAS",
             "spacing_mm": [float(value) for value in spacing],
             "source_shape": list(data.shape),
+            "centering": centering.value,
+            "crop_center_voxel": center.tolist(),
             "pancreas_bbox_start": start.tolist(),
             "pancreas_bbox_stop": stop.tolist(),
-            "pancreas_center_voxel": center.tolist(),
+            "pancreas_center_voxel": mask_center.tolist(),
+            "volume_center_voxel": _volume_center(data.shape).tolist(),
             "target_shape": list(target_shape),
             "pad_before": list(pad_before),
             "pad_after": list(pad_after),
@@ -140,7 +155,10 @@ def prepare_spectre_input(
 
 
 def prepare_merlin_input(
-    ct_image: nib.Nifti1Image, mask_image: nib.Nifti1Image
+    ct_image: nib.Nifti1Image,
+    mask_image: nib.Nifti1Image,
+    *,
+    centering: CenteringMode = CenteringMode.VOLUME,
 ) -> FoundationInput:
     canonical_ct, canonical_mask = _canonical_pair(ct_image, mask_image)
     resampled_ct = resample_to_output(
@@ -163,7 +181,12 @@ def prepare_merlin_input(
         raise ValueError("resampled ROI contains non-finite CT values")
     if not mask.any():
         raise ValueError("resampled ROI pancreas mask is empty")
-    start, stop, center = _mask_bounds(mask)
+    start, stop, mask_center = _mask_bounds(mask)
+    center = (
+        mask_center
+        if centering is CenteringMode.PANCREAS
+        else _volume_center(data.shape)
+    )
     cropped, pad_before, pad_after = centered_crop_or_pad(
         data, center, MERLIN_INPUT_SIZE, fill_value=-1000.0
     )
@@ -179,9 +202,12 @@ def prepare_merlin_input(
             "orientation": "RAS",
             "spacing_mm": list(MERLIN_TARGET_SPACING_MM),
             "resampled_shape": list(data.shape),
+            "centering": centering.value,
+            "crop_center_voxel": center.tolist(),
             "pancreas_bbox_start": start.tolist(),
             "pancreas_bbox_stop": stop.tolist(),
-            "pancreas_center_voxel": center.tolist(),
+            "pancreas_center_voxel": mask_center.tolist(),
+            "volume_center_voxel": _volume_center(data.shape).tolist(),
             "target_shape": list(MERLIN_INPUT_SIZE),
             "pad_before": list(pad_before),
             "pad_after": list(pad_after),

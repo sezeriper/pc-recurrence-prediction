@@ -3,7 +3,11 @@ from __future__ import annotations
 import nibabel as nib
 import numpy as np
 
-from pc_recurrence.image_embedding.constants import MERLIN_INPUT_SIZE, SPECTRE_CROP_SIZE
+from pc_recurrence.image_embedding.constants import (
+    MERLIN_INPUT_SIZE,
+    SPECTRE_CROP_SIZE,
+    CenteringMode,
+)
 from pc_recurrence.image_embedding.foundation_preprocessing import (
     prepare_merlin_input,
     prepare_spectre_input,
@@ -26,7 +30,7 @@ def _peak_center(data: np.ndarray) -> np.ndarray:
 def test_spectre_crop_is_native_spacing_centered_and_grid_padded() -> None:
     ct, mask = _off_center_case()
 
-    prepared = prepare_spectre_input(ct, mask)
+    prepared = prepare_spectre_input(ct, mask, centering=CenteringMode.PANCREAS)
 
     assert all(
         size % crop == 0
@@ -40,10 +44,59 @@ def test_spectre_crop_is_native_spacing_centered_and_grid_padded() -> None:
     )
 
 
+def test_spectre_volume_centering_crops_around_volume_center() -> None:
+    ct, mask = _off_center_case()
+
+    prepared = prepare_spectre_input(ct, mask, centering=CenteringMode.VOLUME)
+
+    assert prepared.metadata["centering"] == "volume"
+    np.testing.assert_allclose(
+        prepared.metadata["crop_center_voxel"],
+        prepared.metadata["volume_center_voxel"],
+        atol=1e-9,
+    )
+    assert not np.allclose(
+        prepared.metadata["crop_center_voxel"],
+        prepared.metadata["pancreas_center_voxel"],
+        atol=1.0,
+    )
+    # The pancreas peak is off-center in the volume, so it must not land at
+    # the crop center under volume centering.
+    assert not np.allclose(
+        _peak_center(prepared.data),
+        (np.asarray(prepared.data.shape) - 1) / 2,
+        atol=1.0,
+    )
+
+
+def test_merlin_volume_centering_crops_around_volume_center() -> None:
+    ct, mask = _off_center_case()
+
+    prepared = prepare_merlin_input(ct, mask, centering=CenteringMode.VOLUME)
+
+    assert prepared.data.shape == MERLIN_INPUT_SIZE
+    assert prepared.metadata["centering"] == "volume"
+    np.testing.assert_allclose(
+        prepared.metadata["crop_center_voxel"],
+        prepared.metadata["volume_center_voxel"],
+        atol=1e-9,
+    )
+    assert not np.allclose(
+        prepared.metadata["crop_center_voxel"],
+        prepared.metadata["pancreas_center_voxel"],
+        atol=1.0,
+    )
+    assert not np.allclose(
+        _peak_center(prepared.data),
+        (np.asarray(MERLIN_INPUT_SIZE) - 1) / 2,
+        atol=2.0,
+    )
+
+
 def test_merlin_crop_is_resampled_scaled_and_centered() -> None:
     ct, mask = _off_center_case()
 
-    prepared = prepare_merlin_input(ct, mask)
+    prepared = prepare_merlin_input(ct, mask, centering=CenteringMode.PANCREAS)
 
     assert prepared.data.shape == MERLIN_INPUT_SIZE
     assert prepared.data.dtype == np.float32

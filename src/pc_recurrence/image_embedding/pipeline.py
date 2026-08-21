@@ -28,6 +28,7 @@ from .constants import (
     SPECTRE_HU_RANGE,
     SPECTRE_REPOSITORY,
     SPECTRE_REVISION,
+    CenteringMode,
     ImageEncoderName,
 )
 from .foundation_models import (
@@ -118,6 +119,7 @@ def _load_cached_case(
     mask_sha256: str | None,
     encoder_name: ImageEncoderName,
     model_fingerprint: str,
+    centering: CenteringMode,
 ) -> CaseEncoding | None:
     if not state_json.is_file() or not state_npz.is_file():
         return None
@@ -127,6 +129,7 @@ def _load_cached_case(
         or metadata.get("roi_pancreas_mask_sha256") != mask_sha256
         or metadata.get("encoder") != encoder_name.value
         or metadata.get("model_fingerprint") != model_fingerprint
+        or metadata.get("centering") != centering.value
     ):
         return None
     with np.load(state_npz, allow_pickle=False) as cached:
@@ -145,6 +148,7 @@ def _encode_foundation_case(
     encoder: Any,
     case: RoiCase,
     encoder_name: ImageEncoderName,
+    centering: CenteringMode,
 ) -> CaseEncoding:
     if case.roi_pancreas_mask_path is None:
         raise ValueError("strict foundation encoding requires roi_pancreas_mask.nii.gz")
@@ -155,7 +159,7 @@ def _encode_foundation_case(
     native_shape = tuple(int(value) for value in image.shape)
     started = time.perf_counter()
     if encoder_name is ImageEncoderName.SPECTRE:
-        prepared = prepare_spectre_input(image, mask)
+        prepared = prepare_spectre_input(image, mask, centering=centering)
         tokens, _ = encode_spectre(
             encoder, prepared.data, expected_grid=prepared.grid_size
         )
@@ -166,7 +170,7 @@ def _encode_foundation_case(
             patch_embeddings.shape[0], int(np.prod(SPECTRE_CROP_SIZE)), dtype=np.int64
         )
     elif encoder_name is ImageEncoderName.MERLIN:
-        prepared = prepare_merlin_input(image, mask)
+        prepared = prepare_merlin_input(image, mask, centering=centering)
         patient_embedding = encode_merlin(encoder, prepared.data)
         patch_embeddings = patient_embedding[None]
         dimension = MERLIN_EMBEDDING_DIMENSION
@@ -213,8 +217,15 @@ def _encode_foundation_case(
 
 
 def _foundation_manifest(
-    encoder_name: ImageEncoderName, artifacts: FoundationModelArtifacts
+    encoder_name: ImageEncoderName,
+    artifacts: FoundationModelArtifacts,
+    centering: CenteringMode,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], int]:
+    centering_text = (
+        "predicted pancreas bounding-box center"
+        if centering is CenteringMode.PANCREAS
+        else "CT volume center"
+    )
     if encoder_name is ImageEncoderName.SPECTRE:
         return (
             {
@@ -238,7 +249,7 @@ def _foundation_manifest(
                 "spacing": "native",
                 "hu_clip": list(SPECTRE_HU_RANGE),
                 "crop_size": list(SPECTRE_CROP_SIZE),
-                "centering": "predicted pancreas bounding-box center",
+                "centering": centering_text,
                 "margin_mm": 15.0,
                 "padding": "-1000 HU to whole crop-grid multiples",
             },
@@ -264,7 +275,7 @@ def _foundation_manifest(
             "hu_clip": list(MERLIN_HU_RANGE),
             "intensity_range": [0.0, 1.0],
             "input_size": list(MERLIN_INPUT_SIZE),
-            "centering": "predicted pancreas bounding-box center",
+            "centering": centering_text,
             "padding": "-1000 HU before intensity scaling",
         },
         MERLIN_EMBEDDING_DIMENSION,
@@ -279,6 +290,7 @@ def run_embedding(
     encoder_name: ImageEncoderName = ImageEncoderName.SPECTRE,
     run_dir: Path | None = None,
     patients: set[str] | None = None,
+    centering: CenteringMode = CenteringMode.VOLUME,
     resume: bool = True,
     force: bool = False,
     local_model_only: bool = False,
@@ -299,7 +311,7 @@ def run_embedding(
     encoder, runtime = load_foundation_runtime(encoder_name, foundation_artifacts)
     model_fingerprint = ":".join(foundation_artifacts.hashes)
     model_manifest, feature_manifest, preprocessing_manifest, dimension = (
-        _foundation_manifest(encoder_name, foundation_artifacts)
+        _foundation_manifest(encoder_name, foundation_artifacts, centering)
     )
 
     completed: list[CaseEncoding] = []
@@ -323,6 +335,7 @@ def run_embedding(
                 mask_sha256=mask_sha256,
                 encoder_name=encoder_name,
                 model_fingerprint=model_fingerprint,
+                centering=centering,
             )
             if resume and not force
             else None
@@ -333,7 +346,7 @@ def run_embedding(
             records.append(cached.record)
             continue
         try:
-            encoded = _encode_foundation_case(encoder, case, encoder_name)
+            encoded = _encode_foundation_case(encoder, case, encoder_name, centering)
             completed.append(encoded)
             rows.append(encoded.summary)
             records.append(encoded.record)
@@ -351,6 +364,7 @@ def run_embedding(
                     "roi_pancreas_mask_sha256": mask_sha256,
                     "encoder": encoder_name.value,
                     "model_fingerprint": model_fingerprint,
+                    "centering": centering.value,
                     "summary": encoded.summary,
                     "record": encoded.record,
                 },
