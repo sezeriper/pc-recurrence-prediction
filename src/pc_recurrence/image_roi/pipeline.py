@@ -334,8 +334,7 @@ def run_segmentation(
                 "overlap": SW_OVERLAP,
                 "blending": "constant",
                 "stitching_device": "cpu",
-                "inference_device": "cuda:0",
-                "cpu_fallback": False,
+                "inference_device": runtime.device_type,
             },
             "tumor_filtering": {
                 "connectivity": 26,

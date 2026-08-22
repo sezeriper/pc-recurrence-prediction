@@ -36,11 +36,10 @@ def test_negative_case_creates_no_patient_artifacts_and_resumes(
     model_path.touch()
     runtime = RuntimeInfo(
         torch_version="test",
-        hip_version="test",
-        device_index=0,
+        device_type="cpu",
         device_name="test",
-        total_gpu_bytes=1,
-        free_gpu_bytes=1,
+        total_device_bytes=1,
+        free_device_bytes=1,
         smoke_test_seconds=0.1,
         smoke_test_shape=(4, 3, 96, 96, 96),
     )
@@ -160,11 +159,10 @@ def test_pancreas_target_creates_roi_without_tumor(tmp_path: Path, monkeypatch) 
     model_path.touch()
     runtime = RuntimeInfo(
         torch_version="test",
-        hip_version="test",
-        device_index=0,
+        device_type="cpu",
         device_name="test",
-        total_gpu_bytes=1,
-        free_gpu_bytes=1,
+        total_device_bytes=1,
+        free_device_bytes=1,
         smoke_test_seconds=0.1,
         smoke_test_shape=(4, 3, 96, 96, 96),
     )

@@ -50,20 +50,15 @@ def test_foundation_encoders_write_finite_dynamic_embeddings(
     runtime = RuntimeInfo(
         torch_version="test",
         monai_version="test",
-        hip_version="test",
-        device_index=0,
+        device_type="cpu",
         device_name="test",
-        total_gpu_bytes=1,
-        free_gpu_bytes=1,
+        total_device_bytes=1,
+        free_device_bytes=1,
         smoke_test_seconds=0.1,
         smoke_test_shape=(dimension,),
     )
-    monkeypatch.setattr(
-        pipeline, "acquire_foundation_model", lambda *_args, **_kwargs: artifacts
-    )
-    monkeypatch.setattr(
-        pipeline, "load_foundation_runtime", lambda *_args: (object(), runtime)
-    )
+    monkeypatch.setattr(pipeline, "acquire_foundation_model", lambda *_args, **_kwargs: artifacts)
+    monkeypatch.setattr(pipeline, "load_foundation_runtime", lambda *_args: (object(), runtime))
     monkeypatch.setattr(
         pipeline,
         "encode_spectre",
@@ -95,9 +90,7 @@ def test_foundation_encoders_write_finite_dynamic_embeddings(
     assert manifest["feature_extraction"]["embedding_dimension"] == dimension
 
 
-def test_volume_centering_invalidates_cache_and_records_mode(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_volume_centering_invalidates_cache_and_records_mode(tmp_path: Path, monkeypatch) -> None:
     roi_run = tmp_path / "roi_run"
     patient_dir = roi_run / "Patient 4"
     patient_dir.mkdir(parents=True)
@@ -118,13 +111,9 @@ def test_volume_centering_invalidates_cache_and_records_mode(
     artifacts = FoundationModelArtifacts(
         paths=(model_file, model_file), hashes=("A" * 64, "B" * 64)
     )
-    runtime = RuntimeInfo("test", "test", "test", 0, "test", 1, 1, 0.1, (2, 1080))
-    monkeypatch.setattr(
-        pipeline, "acquire_foundation_model", lambda *_args, **_kwargs: artifacts
-    )
-    monkeypatch.setattr(
-        pipeline, "load_foundation_runtime", lambda *_args: (object(), runtime)
-    )
+    runtime = RuntimeInfo("test", "test", "cpu", "test", 1, 1, 0.1, (2, 1080))
+    monkeypatch.setattr(pipeline, "acquire_foundation_model", lambda *_args, **_kwargs: artifacts)
+    monkeypatch.setattr(pipeline, "load_foundation_runtime", lambda *_args: (object(), runtime))
     encode_calls: list[str] = []
 
     def _fake_encode_spectre(model, data, *, expected_grid):
@@ -160,9 +149,7 @@ def test_volume_centering_invalidates_cache_and_records_mode(
     assert len(encode_calls) == 2  # volume run recomputed despite cached pancreas state
     second_manifest = json.loads((second / "run_manifest.json").read_text(encoding="utf-8"))
     assert second_manifest["preprocessing"]["centering"] == "CT volume center"
-    state = json.loads(
-        next((second / ".state").glob("*.json")).read_text(encoding="utf-8")
-    )
+    state = json.loads(next((second / ".state").glob("*.json")).read_text(encoding="utf-8"))
     assert state["centering"] == "volume"
     assert state["record"]["preprocessing"]["centering"] == "volume"
     np.testing.assert_allclose(
@@ -189,13 +176,9 @@ def test_foundation_encoder_strictly_skips_missing_pancreas_mask(
     artifacts = FoundationModelArtifacts(
         paths=(model_file, model_file), hashes=("A" * 64, "B" * 64)
     )
-    runtime = RuntimeInfo("test", "test", "test", 0, "test", 1, 1, 0.1, (2, 1080))
-    monkeypatch.setattr(
-        pipeline, "acquire_foundation_model", lambda *_args, **_kwargs: artifacts
-    )
-    monkeypatch.setattr(
-        pipeline, "load_foundation_runtime", lambda *_args: (object(), runtime)
-    )
+    runtime = RuntimeInfo("test", "test", "cpu", "test", 1, 1, 0.1, (2, 1080))
+    monkeypatch.setattr(pipeline, "acquire_foundation_model", lambda *_args, **_kwargs: artifacts)
+    monkeypatch.setattr(pipeline, "load_foundation_runtime", lambda *_args: (object(), runtime))
 
     output = pipeline.run_embedding(
         roi_run,

@@ -3,14 +3,6 @@ from __future__ import annotations
 from enum import StrEnum
 from pathlib import Path
 
-from pc_recurrence.image_roi.constants import (
-    DEFAULT_RUNTIME_PYTHON,
-    EXPECTED_GPU_NAME,
-    EXPECTED_TORCH_VERSION,
-)
-
-MIN_FREE_GPU_BYTES = 6 * 1024**3
-
 DEFAULT_OUTPUT_ROOT = Path("outputs/image_embeddings")
 DEFAULT_MODEL_CACHE = Path(".cache/monai_models")
 
@@ -43,9 +35,3 @@ MERLIN_INPUT_SIZE = (224, 224, 160)
 MERLIN_TARGET_SPACING_MM = (1.5, 1.5, 3.0)
 MERLIN_EMBEDDING_DIMENSION = 2048
 MERLIN_HU_RANGE = (-1000.0, 1000.0)
-
-__all__ = [
-    "DEFAULT_RUNTIME_PYTHON",
-    "EXPECTED_GPU_NAME",
-    "EXPECTED_TORCH_VERSION",
-]

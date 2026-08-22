@@ -501,7 +501,7 @@ def test_fixed_review_assets_expose_accessible_workflow_controls() -> None:
     assert "!candidate.preview_url" in APP_JS
 
 
-def test_review_cli_help_and_cpu_only_options(
+def test_review_cli_help_and_options(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -521,11 +521,7 @@ def test_review_cli_help_and_cpu_only_options(
             open_browser=open_browser,
         )
 
-    def unexpected_dispatch(_runtime_python: Path) -> None:
-        raise AssertionError("review must not dispatch to the GPU runtime")
-
     monkeypatch.setattr(review_ui, "serve_scan_review", fake_serve)
-    monkeypatch.setattr(image_cli, "_dispatch_to_runtime", unexpected_dispatch)
     runner = CliRunner()
 
     help_result = runner.invoke(image_cli.app, ["review", "--help"])

@@ -14,12 +14,11 @@ from huggingface_hub import hf_hub_download
 from monai.inferers import sliding_window_inference
 from nibabel.processing import resample_from_to, resample_to_output
 
+from pc_recurrence.runtime import device_memory_info, select_device
+
 from .constants import (
     BUNDLE_REPOSITORY,
-    EXPECTED_GPU_NAME,
-    EXPECTED_TORCH_VERSION,
     HU_RANGE,
-    MIN_FREE_GPU_BYTES,
     MODEL_FILENAME,
     MODEL_REVISION,
     MODEL_SHA256,
@@ -31,17 +30,16 @@ from .constants import (
 
 
 class RuntimeValidationError(RuntimeError):
-    """Raised when the required ROCm runtime is unavailable or has changed."""
+    """Raised when the model or selected PyTorch runtime is unusable."""
 
 
 @dataclass(frozen=True)
 class RuntimeInfo:
     torch_version: str
-    hip_version: str | None
-    device_index: int
+    device_type: str
     device_name: str
-    total_gpu_bytes: int
-    free_gpu_bytes: int
+    total_device_bytes: int | None
+    free_device_bytes: int | None
     smoke_test_seconds: float
     smoke_test_shape: tuple[int, ...]
 
@@ -87,44 +85,21 @@ def acquire_model(cache_dir: Path, *, local_files_only: bool = False) -> Path:
     return path
 
 
-def _memory_info(device_index: int) -> tuple[int, int]:
-    with torch.cuda.device(device_index):
-        free_bytes, total_bytes = torch.cuda.mem_get_info()
-    return int(free_bytes), int(total_bytes)
-
-
 def validate_and_load_runtime(model_path: Path) -> tuple[torch.jit.ScriptModule, RuntimeInfo]:
-    if torch.__version__ != EXPECTED_TORCH_VERSION:
-        raise RuntimeValidationError(
-            f"expected torch {EXPECTED_TORCH_VERSION}, found {torch.__version__}"
-        )
-    if not torch.cuda.is_available():
-        raise RuntimeValidationError("ROCm GPU is unavailable; CPU fallback is prohibited")
-    if torch.cuda.device_count() < 1:
-        raise RuntimeValidationError("no ROCm devices found")
-    device_index = 0
-    device_name = torch.cuda.get_device_name(device_index)
-    if device_name != EXPECTED_GPU_NAME:
-        raise RuntimeValidationError(f"expected {EXPECTED_GPU_NAME}, found {device_name}")
-    free_bytes, total_bytes = _memory_info(device_index)
-    if free_bytes < MIN_FREE_GPU_BYTES:
-        raise RuntimeValidationError(
-            f"at least 6 GiB free GPU memory is required; found {free_bytes / 1024**3:.2f} GiB"
-        )
     actual = sha256_file(model_path)
     if actual != MODEL_SHA256:
         raise RuntimeValidationError(
             f"model checksum mismatch: expected {MODEL_SHA256}, received {actual}"
         )
 
-    device = torch.device("cuda:0")
-    torch.cuda.set_device(device)
+    device, device_name = select_device()
     model = torch.jit.load(str(model_path), map_location=device).eval()
     smoke = torch.zeros((SW_BATCH_SIZE, 1, *ROI_SIZE), dtype=torch.float32, device=device)
     started = time.perf_counter()
     with torch.inference_mode():
         output = model(smoke)
-        torch.cuda.synchronize(device)
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
     elapsed = time.perf_counter() - started
     expected_shape = (SW_BATCH_SIZE, 3, *ROI_SIZE)
     if tuple(output.shape) != expected_shape or not bool(torch.isfinite(output).all().item()):
@@ -133,14 +108,13 @@ def validate_and_load_runtime(model_path: Path) -> tuple[torch.jit.ScriptModule,
             f"{bool(torch.isfinite(output).all().item())}"
         )
     del smoke, output
-    free_after, total_after = _memory_info(device_index)
+    free_bytes, total_bytes = device_memory_info(device)
     return model, RuntimeInfo(
         torch_version=torch.__version__,
-        hip_version=getattr(torch.version, "hip", None),
-        device_index=device_index,
+        device_type=device.type,
         device_name=device_name,
-        total_gpu_bytes=total_after,
-        free_gpu_bytes=free_after,
+        total_device_bytes=total_bytes,
+        free_device_bytes=free_bytes,
         smoke_test_seconds=elapsed,
         smoke_test_shape=expected_shape,
     )
@@ -176,7 +150,7 @@ def segment_volume(
     volume_hu: np.ndarray,
     affine_ras: np.ndarray,
     *,
-    inference_device: torch.device | str = "cuda:0",
+    inference_device: torch.device | str | None = None,
     output_device: torch.device | str = "cpu",
     roi_size: tuple[int, int, int] = ROI_SIZE,
     sw_batch_size: int = SW_BATCH_SIZE,
@@ -184,6 +158,8 @@ def segment_volume(
 ) -> SegmentationResult:
     preprocessed = preprocess_ct(volume_hu, affine_ras)
     data = np.asarray(preprocessed.dataobj, dtype=np.float32)
+    if inference_device is None:
+        inference_device = next(model.parameters()).device
     tensor = torch.from_numpy(np.ascontiguousarray(data))[None, None]
     started = time.perf_counter()
     with torch.inference_mode():

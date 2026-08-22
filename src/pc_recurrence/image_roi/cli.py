@@ -5,19 +5,15 @@ from typing import Annotated
 
 import typer
 
-from pc_recurrence.gpu_runtime import dispatch_to_gpu_runtime
-
 from .artifacts import create_run_directory
 from .constants import (
     DEFAULT_DICOM_ROOT,
     DEFAULT_MODEL_CACHE,
     DEFAULT_OUTPUT_ROOT,
-    DEFAULT_RUNTIME_PYTHON,
     DEFAULT_SCAN_REVIEW_ROOT,
     DEFAULT_SCAN_SELECTION,
     DEFAULT_SOURCE_DICOM_ROOT,
     DEFAULT_WORKBOOK,
-    EXPECTED_GPU_NAME,
 )
 
 app = typer.Typer(
@@ -32,17 +28,6 @@ def _selected_patients(value: str | None) -> set[str] | None:
     return {item.strip() for item in value.split(",") if item.strip()}
 
 
-def _dispatch_to_runtime(runtime_python: Path) -> None:
-    try:
-        dispatch_to_gpu_runtime(
-            runtime_python,
-            module="pc_recurrence.image_roi.cli",
-            expected_gpu_name=EXPECTED_GPU_NAME,
-        )
-    except (RuntimeError, ValueError) as error:
-        raise typer.BadParameter(str(error)) from error
-
-
 @app.command()
 def inspect(
     dicom_root: Annotated[Path, typer.Option(exists=True, file_okay=False)] = DEFAULT_DICOM_ROOT,
@@ -52,10 +37,8 @@ def inspect(
     patients: Annotated[
         str | None, typer.Option(help="Comma-separated patient folder names.")
     ] = None,
-    runtime_python: Annotated[Path, typer.Option()] = DEFAULT_RUNTIME_PYTHON,
 ) -> None:
     """Audit CT series geometry without running the segmentation model."""
-    _dispatch_to_runtime(runtime_python)
     from .pipeline import inspect_dataset, write_inspection_run
 
     destination = run_dir or create_run_directory(output_root)
@@ -199,11 +182,9 @@ def _run(
     patients: str | None,
     resume: bool,
     force: bool,
-    runtime_python: Path,
     *,
     local_model_only: bool,
 ) -> None:
-    _dispatch_to_runtime(runtime_python)
     from .pipeline import run_segmentation
 
     destination = run_segmentation(
@@ -232,7 +213,6 @@ def segment(
     ] = None,
     resume: Annotated[bool, typer.Option("--resume/--no-resume")] = True,
     force: Annotated[bool, typer.Option("--force")] = False,
-    runtime_python: Annotated[Path, typer.Option()] = DEFAULT_RUNTIME_PYTHON,
 ) -> None:
     """Run from an already cached and checksum-verified model."""
     _run(
@@ -244,7 +224,6 @@ def segment(
         patients,
         resume,
         force,
-        runtime_python,
         local_model_only=True,
     )
 
@@ -261,7 +240,6 @@ def run_pipeline(
     ] = None,
     resume: Annotated[bool, typer.Option("--resume/--no-resume")] = True,
     force: Annotated[bool, typer.Option("--force")] = False,
-    runtime_python: Annotated[Path, typer.Option()] = DEFAULT_RUNTIME_PYTHON,
 ) -> None:
     """Acquire the pinned model, segment CT scans, and create review artifacts."""
     _run(
@@ -273,7 +251,6 @@ def run_pipeline(
         patients,
         resume,
         force,
-        runtime_python,
         local_model_only=False,
     )
 

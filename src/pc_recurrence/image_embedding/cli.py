@@ -5,13 +5,9 @@ from typing import Annotated
 
 import typer
 
-from pc_recurrence.gpu_runtime import dispatch_to_gpu_runtime
-
 from .constants import (
     DEFAULT_MODEL_CACHE,
     DEFAULT_OUTPUT_ROOT,
-    DEFAULT_RUNTIME_PYTHON,
-    EXPECTED_GPU_NAME,
     CenteringMode,
     ImageEncoderName,
 )
@@ -28,17 +24,6 @@ def _selected_patients(value: str | None) -> set[str] | None:
     return {item.strip() for item in value.split(",") if item.strip()}
 
 
-def _dispatch_to_runtime(runtime_python: Path) -> None:
-    try:
-        dispatch_to_gpu_runtime(
-            runtime_python,
-            module="pc_recurrence.image_embedding.cli",
-            expected_gpu_name=EXPECTED_GPU_NAME,
-        )
-    except (RuntimeError, ValueError) as error:
-        raise typer.BadParameter(str(error)) from error
-
-
 def _run(
     roi_run: Path,
     encoder: ImageEncoderName,
@@ -49,11 +34,9 @@ def _run(
     centering: CenteringMode,
     resume: bool,
     force: bool,
-    runtime_python: Path,
     *,
     local_model_only: bool,
 ) -> None:
-    _dispatch_to_runtime(runtime_python)
     from .pipeline import run_embedding
 
     destination = run_embedding(
@@ -87,7 +70,6 @@ def embed(
     ] = CenteringMode.VOLUME,
     resume: Annotated[bool, typer.Option("--resume/--no-resume")] = True,
     force: Annotated[bool, typer.Option("--force")] = False,
-    runtime_python: Annotated[Path, typer.Option()] = DEFAULT_RUNTIME_PYTHON,
 ) -> None:
     """Encode ROIs using an already cached and checksum-verified checkpoint."""
     _run(
@@ -100,7 +82,6 @@ def embed(
         centering,
         resume,
         force,
-        runtime_python,
         local_model_only=True,
     )
 
@@ -121,7 +102,6 @@ def run_pipeline(
     ] = CenteringMode.VOLUME,
     resume: Annotated[bool, typer.Option("--resume/--no-resume")] = True,
     force: Annotated[bool, typer.Option("--force")] = False,
-    runtime_python: Annotated[Path, typer.Option()] = DEFAULT_RUNTIME_PYTHON,
 ) -> None:
     """Acquire the selected pinned checkpoint and encode all selected ROIs."""
     _run(
@@ -134,7 +114,6 @@ def run_pipeline(
         centering,
         resume,
         force,
-        runtime_python,
         local_model_only=False,
     )
 

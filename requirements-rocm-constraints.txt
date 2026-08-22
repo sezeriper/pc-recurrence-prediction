@@ -1,4 +1,0 @@
-# Protect the verified RX 6900 XT ROCm runtime from dependency resolution changes.
-torch==2.10.0+rocm7.12.0a20260204
-torchaudio==2.10.0+rocm7.12.0a20260204
-torchvision==0.25.0+rocm7.12.0a20260204

@@ -11,22 +11,14 @@ scientific recurrence model or evaluation.
 
 ## Setup
 
-Install local CPU imaging dependencies for development and tests with:
+Install the project, imaging dependencies, and development tools:
 
-```powershell
+```shell
 uv sync --extra imaging --group dev
 ```
 
-Real inference is dispatched to the verified RX 6900 XT ROCm interpreter at
-`D:\Projects\RCOm-windows-gfx1030\.venv-nightly`. Install this project into that environment while
-protecting its accelerator packages:
-
-```powershell
-uv pip install `
-  --python "D:\Projects\RCOm-windows-gfx1030\.venv-nightly\Scripts\python.exe" `
-  --constraint requirements-rocm-constraints.txt `
-  --editable ".[imaging]"
-```
+Run commands through `uv run`; no separate interpreter or hardware-specific constraints file is
+required. PyTorch uses the first available CUDA device, then Apple MPS, and otherwise CPU.
 
 ## CT segmentation and ROI review
 
@@ -38,7 +30,7 @@ writes inside `dataset/`.
 
 Create an operator review inventory before curating any slices:
 
-```powershell
+```shell
 uv run pc-image-roi inventory
 ```
 
@@ -54,7 +46,7 @@ workbook's one-based inclusive `Görüntü alanı` ordinals after ascending `Ins
 
 Open the loopback-only montage reviewer for that existing inventory:
 
-```powershell
+```shell
 uv run pc-image-roi review
 ```
 
@@ -67,7 +59,7 @@ URL without launching a browser.
 Choose exactly one `ready` row per patient in the reviewer, or set `selected=yes` directly in the
 CSV and leave every other `selected` cell blank. Then curate:
 
-```powershell
+```shell
 uv run pc-image-roi preprocess
 ```
 
@@ -90,17 +82,16 @@ choose a larger Series or repeat the operator's selection. Study UID, Series UID
 Instance UIDs, and geometry warnings remain in inspection, segmentation, state, and bounding-box
 artifacts.
 
-```powershell
+```shell
 uv run pc-image-roi inspect
-uv run pc-image-roi segment `
+uv run pc-image-roi segment \
   --run-dir "outputs/image_roi/<existing-run>" --resume
 uv run pc-image-roi run
 ```
 
 Use `--patients "Patient 1,Patient 3"` (workbook IDs) or `--patients "PATIENT2321275"` (DICOM
-folder names) for a subset. `--force` replaces cached state within the selected run. There is no
-CPU fallback: segmentation stops if the exact ROCm build, RX 6900 XT, or minimum free-memory
-requirement is unavailable.
+folder names) for a subset. `--force` replaces cached state within the selected run. Inference
+automatically uses the available CUDA, Apple MPS, or CPU runtime.
 
 Every run centers the ROI on the predicted pancreas; tumor-centered ROIs are not produced. Patients
 without a pancreas prediction produce no ROI artifacts.
@@ -120,19 +111,19 @@ ROI run. Select a backend with `--encoder spectre|merlin`. Both encoders require
 encoded case.
 For example:
 
-```powershell
-uv run pc-image-embed run `
-  --encoder spectre `
+```shell
+uv run pc-image-embed run \
+  --encoder spectre \
   --roi-run "outputs/image_roi/<pancreas-roi-run>"
 
-uv run pc-image-embed run `
-  --encoder merlin `
+uv run pc-image-embed run \
+  --encoder merlin \
   --roi-run "outputs/image_roi/<pancreas-roi-run>"
 ```
 
-The command dispatches to the same verified ROCm interpreter and has no silent CPU fallback. Use
-`embed` instead of `run` to require an already cached checkpoint. `--patients`, `--run-dir`,
-`--resume`, `--force`, and `--centering` are supported.
+The command uses the same environment created by `uv sync`. Use `embed` instead of `run` to require
+an already cached checkpoint. `--patients`, `--run-dir`, `--resume`, `--force`, and `--centering`
+are supported.
 
 Both encoders center their crop on the CT volume's geometric center by default. Pass
 `--centering pancreas` to center the crop on the predicted pancreas bounding box instead; window
@@ -149,10 +140,8 @@ The backends are pinned and save float32 embeddings without L2 normalization:
   1.5 x 1.5 x 3 mm, clips `[-1000, 1000]` HU into `[0, 1]`, centers a 224 x 224 x 160 input on the
   pancreas, loads only the I3ResNet image substate, and saves its 2,048-value pooled embedding.
 
-The package versions, Hugging Face revisions, and checkpoint SHA-256 values are pinned in the
-source and recorded in every run manifest. The launcher enumerates physical ROCm devices before
-Torch import, exposes the RX 6900 XT through `HIP_VISIBLE_DEVICES`, and verifies it as logical
-`cuda:0`.
+Package versions, Hugging Face revisions, and checkpoint SHA-256 values are recorded in every run
+manifest. The runtime also records the selected device type and name.
 
 Each run writes:
 
@@ -163,10 +152,10 @@ Each run writes:
 
 ## Verification
 
-```powershell
+```shell
 uv run ruff check .
 uv run pytest
 ```
 
-GPU-marked tests require the pinned AMD ROCm runtime and RX 6900 XT; they skip unless
-`RUN_IMAGE_GPU_TEST=1` is set.
+The real-model smoke test is opt-in because it requires cached model weights and substantial
+compute. Run it with `RUN_IMAGE_MODEL_TEST=1 uv run pytest tests/test_image_gpu.py`.

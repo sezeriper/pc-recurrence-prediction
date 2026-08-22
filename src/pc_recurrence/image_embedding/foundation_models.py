@@ -11,16 +11,15 @@ import numpy as np
 import torch
 from huggingface_hub import hf_hub_download
 
+from pc_recurrence.runtime import device_memory_info, inference_autocast, select_device
+
 from .constants import (
-    EXPECTED_GPU_NAME,
-    EXPECTED_TORCH_VERSION,
     MERLIN_EMBEDDING_DIMENSION,
     MERLIN_FILENAME,
     MERLIN_INPUT_SIZE,
     MERLIN_REPOSITORY,
     MERLIN_REVISION,
     MERLIN_SHA256,
-    MIN_FREE_GPU_BYTES,
     SPECTRE_BACKBONE_FILENAME,
     SPECTRE_BACKBONE_SHA256,
     SPECTRE_COMBINER_FILENAME,
@@ -34,18 +33,17 @@ from .constants import (
 
 
 class RuntimeValidationError(RuntimeError):
-    """Raised when the pinned model or required ROCm runtime is unavailable."""
+    """Raised when a model artifact or the selected PyTorch runtime is unusable."""
 
 
 @dataclass(frozen=True)
 class RuntimeInfo:
     torch_version: str
     monai_version: str
-    hip_version: str | None
-    device_index: int
+    device_type: str
     device_name: str
-    total_gpu_bytes: int
-    free_gpu_bytes: int
+    total_device_bytes: int | None
+    free_device_bytes: int | None
     smoke_test_seconds: float
     smoke_test_shape: tuple[int, ...]
 
@@ -132,40 +130,22 @@ def acquire_foundation_model(
     raise ValueError(f"unsupported foundation encoder: {encoder_name}")
 
 
-def _validate_device() -> torch.device:
-    if torch.__version__ != EXPECTED_TORCH_VERSION:
-        raise RuntimeValidationError(
-            f"expected torch {EXPECTED_TORCH_VERSION}, found {torch.__version__}"
-        )
-    if not torch.cuda.is_available() or torch.cuda.device_count() != 1:
-        raise RuntimeValidationError(
-            "the GPU launcher must expose exactly one ROCm device; CPU fallback is prohibited"
-        )
-    device_name = torch.cuda.get_device_name(0)
-    if device_name != EXPECTED_GPU_NAME:
-        raise RuntimeValidationError(f"expected {EXPECTED_GPU_NAME}, found {device_name}")
-    free_bytes, _ = torch.cuda.mem_get_info(0)
-    if free_bytes < MIN_FREE_GPU_BYTES:
-        raise RuntimeValidationError(
-            f"at least 6 GiB free GPU memory is required; found {free_bytes / 1024**3:.2f} GiB"
-        )
-    device = torch.device("cuda:0")
-    torch.cuda.set_device(device)
-    return device
-
-
-def _runtime_info(started: float, smoke_shape: tuple[int, ...]) -> RuntimeInfo:
+def _runtime_info(
+    device: torch.device,
+    device_name: str,
+    started: float,
+    smoke_shape: tuple[int, ...],
+) -> RuntimeInfo:
     import monai
 
-    free_bytes, total_bytes = torch.cuda.mem_get_info(0)
+    free_bytes, total_bytes = device_memory_info(device)
     return RuntimeInfo(
         torch_version=torch.__version__,
         monai_version=monai.__version__,
-        hip_version=getattr(torch.version, "hip", None),
-        device_index=0,
-        device_name=torch.cuda.get_device_name(0),
-        total_gpu_bytes=int(total_bytes),
-        free_gpu_bytes=int(free_bytes),
+        device_type=device.type,
+        device_name=device_name,
+        total_device_bytes=total_bytes,
+        free_device_bytes=free_bytes,
         smoke_test_seconds=time.perf_counter() - started,
         smoke_test_shape=smoke_shape,
     )
@@ -217,7 +197,7 @@ def _load_merlin(artifacts: FoundationModelArtifacts) -> torch.nn.Module:
 def load_foundation_runtime(
     encoder_name: ImageEncoderName, artifacts: FoundationModelArtifacts
 ) -> tuple[torch.nn.Module, RuntimeInfo]:
-    device = _validate_device()
+    device, device_name = select_device()
     started = time.perf_counter()
     if encoder_name is ImageEncoderName.SPECTRE:
         model = _load_spectre(artifacts).to(device).eval()
@@ -238,7 +218,7 @@ def load_foundation_runtime(
             )
     else:
         raise ValueError(f"unsupported foundation encoder: {encoder_name}")
-    return model, _runtime_info(started, expected)
+    return model, _runtime_info(device, device_name, started, expected)
 
 
 def encode_spectre(
@@ -250,8 +230,10 @@ def encode_spectre(
     data = np.asarray(volume_hu, dtype=np.float32)
     if data.ndim != 3 or not np.isfinite(data).all():
         raise ValueError("SPECTRE input must be a finite 3D HU volume")
-    tensor = torch.from_numpy(np.ascontiguousarray(data))[None]
-    with torch.inference_mode(), torch.autocast(device_type="cuda", dtype=torch.float16):
+    device = next(model.parameters()).device
+    tensor = torch.from_numpy(np.ascontiguousarray(data))[None].to(device)
+    autocast = inference_autocast(device)
+    with torch.inference_mode(), autocast:
         features = model.extract(tensor, max_crops_per_forward=1)
     values = features.to(device="cpu", dtype=torch.float32).numpy()
     if values.ndim != 2 or values.shape[1] != SPECTRE_EMBEDDING_DIMENSION:
@@ -268,8 +250,10 @@ def encode_merlin(model: torch.nn.Module, normalized_volume: np.ndarray) -> np.n
     data = np.asarray(normalized_volume, dtype=np.float32)
     if data.shape != MERLIN_INPUT_SIZE or not np.isfinite(data).all():
         raise ValueError(f"Merlin input must have shape {MERLIN_INPUT_SIZE}")
-    tensor = torch.from_numpy(np.ascontiguousarray(data))[None, None].to("cuda:0")
-    with torch.inference_mode(), torch.autocast(device_type="cuda", dtype=torch.float16):
+    device = next(model.parameters()).device
+    tensor = torch.from_numpy(np.ascontiguousarray(data))[None, None].to(device)
+    autocast = inference_autocast(device)
+    with torch.inference_mode(), autocast:
         output = model(tensor)
     values = output.to(device="cpu", dtype=torch.float32).reshape(-1).numpy()
     if values.shape != (MERLIN_EMBEDDING_DIMENSION,) or not np.isfinite(values).all():
