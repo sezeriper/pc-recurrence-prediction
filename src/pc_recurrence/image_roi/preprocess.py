@@ -4,15 +4,16 @@ import csv
 import hashlib
 import json
 import shutil
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from pc_recurrence import __version__
 
-from .dicom import DicomGeometryError, inspect_patient, select_series_files
-from .pipeline import workbook_entries
-from .workbook import load_image_workbook
+from .dicom import DicomGeometryError, discover_dicom_series, inspect_patient, select_series_files
+from .scan_selection import PatientSeriesSelection, load_scan_selections, series_sop_uids_sha256
+from .workbook import ImageWorkbookRow, load_image_workbook, select_image_workbook_rows
 
 
 @dataclass
@@ -20,7 +21,7 @@ class CuratedFile:
     source: str
     destination: str
     sha256: str
-    action: str  # "copied" | "unchanged" | "overwritten"
+    action: str
 
     def to_dict(self) -> dict[str, str]:
         return self.__dict__.copy()
@@ -33,12 +34,18 @@ class CuratedPatient:
     hasta_no: str | float | None
     dicom_folder: str | None
     image_range_raw: str | None
-    status: str  # "copied" | "skipped"
+    status: str
     reason: str | None
     source_dir: str | None
     destination_dir: str | None
     geometry_status: str | None
     geometry_reason: str | None
+    candidate_id: str | None = None
+    study_uid: str | None = None
+    series_uid: str | None = None
+    series_sop_uids_sha256: str | None = None
+    source_file_count: int = 0
+    duplicate_file_count: int = 0
     selected_file_count: int = 0
     copied_file_count: int = 0
     unchanged_file_count: int = 0
@@ -47,25 +54,9 @@ class CuratedPatient:
     files: list[CuratedFile] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
-        return {
-            "patient_id": self.patient_id,
-            "row_number": self.row_number,
-            "hasta_no": self.hasta_no,
-            "dicom_folder": self.dicom_folder,
-            "image_range_raw": self.image_range_raw,
-            "status": self.status,
-            "reason": self.reason,
-            "source_dir": self.source_dir,
-            "destination_dir": self.destination_dir,
-            "geometry_status": self.geometry_status,
-            "geometry_reason": self.geometry_reason,
-            "selected_file_count": self.selected_file_count,
-            "copied_file_count": self.copied_file_count,
-            "unchanged_file_count": self.unchanged_file_count,
-            "selected_instance_numbers": self.selected_instance_numbers,
-            "selected_sop_instance_uids": self.selected_sop_instance_uids,
-            "files": [item.to_dict() for item in self.files],
-        }
+        data = self.__dict__.copy()
+        data["files"] = [item.to_dict() for item in self.files]
+        return data
 
 
 @dataclass
@@ -73,6 +64,7 @@ class CurationReport:
     dicom_root: Path
     output_root: Path
     workbook_path: Path
+    selection_path: Path
     patients: list[CuratedPatient]
 
     @property
@@ -85,15 +77,9 @@ class CurationReport:
             "patient_count": len(self.patients),
             "copied_patient_count": sum(patient.status == "copied" for patient in self.patients),
             "skipped_patient_count": len(self.failures),
-            "selected_slice_count": sum(
-                patient.selected_file_count for patient in self.patients
-            ),
-            "copied_file_count": sum(
-                patient.copied_file_count for patient in self.patients
-            ),
-            "unchanged_file_count": sum(
-                patient.unchanged_file_count for patient in self.patients
-            ),
+            "selected_slice_count": sum(patient.selected_file_count for patient in self.patients),
+            "copied_file_count": sum(patient.copied_file_count for patient in self.patients),
+            "unchanged_file_count": sum(patient.unchanged_file_count for patient in self.patients),
         }
 
     def to_dict(self) -> dict[str, Any]:
@@ -105,9 +91,13 @@ class CurationReport:
             "output_root": str(self.output_root.resolve()),
             "workbook": str(self.workbook_path.resolve()),
             "workbook_sha256": _file_sha256(self.workbook_path),
+            "selection_path": str(self.selection_path.resolve()),
+            "selection_sha256": _file_sha256(self.selection_path),
             "policy": {
+                "series_selection": "exact StudyInstanceUID and SeriesInstanceUID",
+                "duplicate_policy": "byte-identical SOPInstanceUID copies collapse to one file",
                 "indexing": "one-based inclusive ordinals after ascending DICOM InstanceNumber",
-                "copy_policy": "shutil.copy2 with SHA-256 verification",
+                "copy_policy": "staged complete-set replacement with SHA-256 verification",
                 "idempotent": True,
                 "source_preserved": True,
             },
@@ -122,6 +112,12 @@ SUMMARY_COLUMNS = (
     "row_number",
     "hasta_no",
     "dicom_folder",
+    "candidate_id",
+    "study_uid",
+    "series_uid",
+    "series_sop_uids_sha256",
+    "source_file_count",
+    "duplicate_file_count",
     "status",
     "reason",
     "geometry_status",
@@ -143,135 +139,160 @@ def _file_sha256(path: Path) -> str:
 
 
 def _skipped_patient(
+    row: ImageWorkbookRow,
+    selection: PatientSeriesSelection,
     *,
-    patient_id: str,
-    row_number: int,
-    hasta_no: str | float | None,
-    dicom_folder: str | None,
-    image_range_raw: str | None,
     reason: str,
-    source_dir: str | None,
-    destination_dir: str | None = None,
-    geometry_status: str | None = None,
-    geometry_reason: str | None = None,
+    source_dir: Path,
+    destination_dir: Path,
 ) -> CuratedPatient:
     return CuratedPatient(
-        patient_id=patient_id,
-        row_number=row_number,
-        hasta_no=hasta_no,
-        dicom_folder=dicom_folder,
-        image_range_raw=image_range_raw,
+        patient_id=row.patient_id,
+        row_number=row.row_number,
+        hasta_no=row.hasta_no,
+        dicom_folder=row.dicom_folder,
+        image_range_raw=row.image_range_raw,
         status="skipped",
         reason=reason,
-        source_dir=source_dir,
-        destination_dir=destination_dir,
-        geometry_status=geometry_status,
-        geometry_reason=geometry_reason,
+        source_dir=str(source_dir.resolve()),
+        destination_dir=str(destination_dir.resolve()),
+        geometry_status=None,
+        geometry_reason=None,
+        candidate_id=selection.candidate_id,
+        study_uid=selection.key.study_uid,
+        series_uid=selection.key.series_uid,
     )
 
 
 def _curate_patient(
     dicom_root: Path,
     output_root: Path,
+    row: ImageWorkbookRow,
+    selection: PatientSeriesSelection,
     *,
-    patient_id: str,
-    row_number: int,
-    hasta_no: str | float | None,
-    dicom_folder: str | None,
-    image_range_raw: str | None,
     force: bool,
 ) -> CuratedPatient:
-    source_dir = dicom_root / dicom_folder if dicom_folder else None
-    source_dir_text = str(source_dir.resolve()) if source_dir else None
-    if source_dir is None or not source_dir.is_dir():
-        return _skipped_patient(
-            patient_id=patient_id,
-            row_number=row_number,
-            hasta_no=hasta_no,
-            dicom_folder=dicom_folder,
-            image_range_raw=image_range_raw,
-            reason="no source DICOM folder",
-            source_dir=source_dir_text,
-        )
-    if not isinstance(image_range_raw, str) or not image_range_raw.strip():
-        return _skipped_patient(
-            patient_id=patient_id,
-            row_number=row_number,
-            hasta_no=hasta_no,
-            dicom_folder=dicom_folder,
-            image_range_raw=image_range_raw,
-            reason="no workbook image range",
-            source_dir=source_dir_text,
-        )
-
+    source_dir = dicom_root / selection.dicom_folder
+    destination_dir = output_root / selection.dicom_folder
+    series = next(
+        item for item in discover_dicom_series(source_dir).series if item.key == selection.key
+    )
     try:
-        files, instance_numbers, sop_uids = select_series_files(source_dir, image_range_raw)
+        files, instance_numbers, sop_uids = select_series_files(
+            source_dir, selection.key, row.image_range_raw
+        )
     except DicomGeometryError as exc:
         return _skipped_patient(
-            patient_id=patient_id,
-            row_number=row_number,
-            hasta_no=hasta_no,
-            dicom_folder=dicom_folder,
-            image_range_raw=image_range_raw,
+            row,
+            selection,
             reason=str(exc),
-            source_dir=source_dir_text,
+            source_dir=source_dir,
+            destination_dir=destination_dir,
         )
-
-    destination_dir = output_root / dicom_folder
-    destination_dir.mkdir(parents=True, exist_ok=True)
-    curated_files: list[CuratedFile] = []
-    copied_count = 0
-    unchanged_count = 0
-    try:
-        for path in files:
-            destination = destination_dir / path.name
-            source_sha256 = _file_sha256(path)
-            existed = destination.exists()
-            if existed and not force and _file_sha256(destination) == source_sha256:
-                unchanged_count += 1
-                action = "unchanged"
-            else:
-                shutil.copy2(path, destination)
-                copied_count += 1
-                action = "overwritten" if existed else "copied"
-            verified_sha256 = _file_sha256(destination)
-            if verified_sha256 != source_sha256:
-                raise RuntimeError(
-                    f"SHA-256 mismatch after copy for {path.name}"
-                )
-            curated_files.append(
+    basenames = [path.name for path in files]
+    if len(basenames) != len(set(basenames)):
+        return _skipped_patient(
+            row,
+            selection,
+            reason="duplicate destination basenames in selected files",
+            source_dir=source_dir,
+            destination_dir=destination_dir,
+        )
+    desired_hashes = {path.name: _file_sha256(path) for path in files}
+    destination_matches = False
+    if destination_dir.is_dir() and not force:
+        entries = list(destination_dir.iterdir())
+        existing = {path.name: path for path in entries if path.is_file()}
+        destination_matches = (
+            len(existing) == len(entries)
+            and set(existing) == set(desired_hashes)
+            and all(
+                _file_sha256(existing[name]) == digest for name, digest in desired_hashes.items()
+            )
+        )
+    if destination_matches:
+        curated_files = [
+            CuratedFile(
+                source=str(path),
+                destination=str(destination_dir / path.name),
+                sha256=desired_hashes[path.name],
+                action="unchanged",
+            )
+            for path in files
+        ]
+        copied_count = 0
+        unchanged_count = len(files)
+    else:
+        output_root.mkdir(parents=True, exist_ok=True)
+        staging_dir = output_root / f".{selection.dicom_folder}.staging-{uuid.uuid4().hex}"
+        backup_dir = output_root / f".{selection.dicom_folder}.backup-{uuid.uuid4().hex}"
+        replacement = destination_dir.exists()
+        curated_files = []
+        try:
+            staging_dir.mkdir()
+            for path in files:
+                staged = staging_dir / path.name
+                shutil.copy2(path, staged)
+                if _file_sha256(staged) != desired_hashes[path.name]:
+                    raise RuntimeError(f"SHA-256 mismatch after copy for {path.name}")
+            if replacement:
+                destination_dir.replace(backup_dir)
+            try:
+                staging_dir.replace(destination_dir)
+            except Exception:
+                if backup_dir.exists() and not destination_dir.exists():
+                    backup_dir.replace(destination_dir)
+                raise
+            if backup_dir.is_dir():
+                shutil.rmtree(backup_dir)
+            elif backup_dir.exists():
+                backup_dir.unlink()
+            action = "overwritten" if replacement else "copied"
+            curated_files = [
                 CuratedFile(
                     source=str(path),
-                    destination=str(destination),
-                    sha256=verified_sha256,
+                    destination=str(destination_dir / path.name),
+                    sha256=desired_hashes[path.name],
                     action=action,
                 )
+                for path in files
+            ]
+        except Exception as exc:
+            if staging_dir.exists():
+                shutil.rmtree(staging_dir)
+            if backup_dir.exists() and not destination_dir.exists():
+                backup_dir.replace(destination_dir)
+            return _skipped_patient(
+                row,
+                selection,
+                reason=f"{type(exc).__name__}: {exc}",
+                source_dir=source_dir,
+                destination_dir=destination_dir,
             )
-    except Exception as exc:
-        return _skipped_patient(
-            patient_id=patient_id,
-            row_number=row_number,
-            hasta_no=hasta_no,
-            dicom_folder=dicom_folder,
-            image_range_raw=image_range_raw,
-            reason=f"{type(exc).__name__}: {exc}",
-            source_dir=source_dir_text,
-            destination_dir=str(destination_dir.resolve()),
-        )
+        copied_count = len(files)
+        unchanged_count = 0
 
-    inspection = inspect_patient(destination_dir, patient_id=patient_id)
+    inspection = inspect_patient(
+        destination_dir, patient_id=row.patient_id, selection=selection.key
+    )
     return CuratedPatient(
-        patient_id=patient_id,
-        row_number=row_number,
-        hasta_no=hasta_no,
-        dicom_folder=dicom_folder,
-        image_range_raw=image_range_raw,
+        patient_id=row.patient_id,
+        row_number=row.row_number,
+        hasta_no=row.hasta_no,
+        dicom_folder=row.dicom_folder,
+        image_range_raw=row.image_range_raw,
         status="copied",
         reason=None,
-        source_dir=source_dir_text,
+        source_dir=str(source_dir.resolve()),
         destination_dir=str(destination_dir.resolve()),
         geometry_status=inspection.geometry_status,
         geometry_reason=inspection.reason,
+        candidate_id=selection.candidate_id,
+        study_uid=selection.key.study_uid,
+        series_uid=selection.key.series_uid,
+        series_sop_uids_sha256=series_sop_uids_sha256(series),
+        source_file_count=series.source_file_count,
+        duplicate_file_count=series.duplicate_file_count,
         selected_file_count=len(files),
         copied_file_count=copied_count,
         unchanged_file_count=unchanged_count,
@@ -285,61 +306,47 @@ def curate_dataset(
     dicom_root: Path,
     output_root: Path,
     workbook_path: Path,
+    selection_path: Path,
     *,
     patients: set[str] | None = None,
     force: bool = False,
 ) -> CurationReport:
-    """Copy workbook-defined slice ranges into a curated DICOM folder.
-
-    The workbook is processed in table order. Patients whose DICOM folder is
-    missing, whose range is missing or invalid, or whose copy verification
-    fails are recorded as skips and never abort the run. Geometry eligibility
-    is documented per patient but does not gate the copy, so a table range
-    spanning two acquisition blocks (e.g. PATIENT853534) is copied as-is.
-    Re-running skips byte-identical files unless ``force`` is set.
-    """
-    entries = workbook_entries(workbook_path)
-    output_root.mkdir(parents=True, exist_ok=True)
-    report_patients: list[CuratedPatient] = []
-    for row in load_image_workbook(workbook_path):
-        patient_id = row.patient_id
-        dicom_folder = row.dicom_folder
-        if patients is not None and patient_id not in patients and dicom_folder not in patients:
-            continue
-        report_patients.append(
-            _curate_patient(
-                dicom_root,
-                output_root,
-                patient_id=patient_id,
-                row_number=row.row_number,
-                hasta_no=row.hasta_no,
-                dicom_folder=dicom_folder,
-                image_range_raw=entries[patient_id]["image_range_raw"],
-                force=force,
-            )
+    """Validate all explicit choices, then synchronize exact curated Series ranges."""
+    workbook_rows = select_image_workbook_rows(load_image_workbook(workbook_path), patients)
+    selections = load_scan_selections(selection_path, dicom_root, workbook_path, patients=patients)
+    report_patients = [
+        _curate_patient(
+            dicom_root,
+            output_root,
+            row,
+            selections[row.patient_id],
+            force=force,
         )
+        for row in workbook_rows
+    ]
     return CurationReport(
         dicom_root=dicom_root,
         output_root=output_root,
         workbook_path=workbook_path,
+        selection_path=selection_path,
         patients=report_patients,
     )
 
 
 def write_curation_report(report: CurationReport) -> tuple[Path, Path]:
-    """Write curation_summary.csv and curation_manifest.json into the output root."""
+    report.output_root.mkdir(parents=True, exist_ok=True)
     summary_path = report.output_root / "curation_summary.csv"
-    with summary_path.open("w", encoding="utf-8-sig", newline="") as handle:
+    temporary_summary = summary_path.with_suffix(summary_path.suffix + ".tmp")
+    with temporary_summary.open("w", encoding="utf-8-sig", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=SUMMARY_COLUMNS, extrasaction="ignore")
         writer.writeheader()
         for patient in report.patients:
             writer.writerow({column: getattr(patient, column) for column in SUMMARY_COLUMNS})
+    temporary_summary.replace(summary_path)
     manifest_path = report.output_root / "curation_manifest.json"
-    manifest_path.parent.mkdir(parents=True, exist_ok=True)
     temporary = manifest_path.with_suffix(manifest_path.suffix + ".tmp")
     temporary.write_text(
-        json.dumps(report.to_dict(), ensure_ascii=False, indent=2),
-        encoding="utf-8",
+        json.dumps(report.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8"
     )
     temporary.replace(manifest_path)
     return summary_path, manifest_path

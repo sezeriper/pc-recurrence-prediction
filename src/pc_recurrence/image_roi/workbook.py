@@ -70,9 +70,7 @@ def load_image_workbook(
         raw_headers = next(rows, None)
         if raw_headers is None:
             raise ValueError("Workbook is empty")
-        headers = tuple(
-            str(value).strip() if value is not None else "" for value in raw_headers
-        )
+        headers = tuple(str(value).strip() if value is not None else "" for value in raw_headers)
         if headers != EXPECTED_HEADERS:
             raise ValueError(
                 f"Unexpected workbook schema. Expected {EXPECTED_HEADERS}; found {headers}"
@@ -106,3 +104,23 @@ def load_image_workbook(
     if not records:
         raise ValueError("No populated patient rows were found")
     return records
+
+
+def select_image_workbook_rows(
+    rows: list[ImageWorkbookRow],
+    patients: set[str] | None,
+) -> list[ImageWorkbookRow]:
+    if patients is None:
+        return rows
+    selected = [
+        row
+        for row in rows
+        if row.patient_id in patients
+        or (row.dicom_folder is not None and row.dicom_folder in patients)
+    ]
+    matched = {row.patient_id for row in selected}
+    matched.update(row.dicom_folder for row in selected if row.dicom_folder is not None)
+    unknown = sorted(patients - matched)
+    if unknown:
+        raise ValueError(f"Unknown patient aliases: {', '.join(unknown)}")
+    return selected

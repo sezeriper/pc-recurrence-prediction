@@ -5,8 +5,13 @@ from pathlib import Path
 import nibabel as nib
 import numpy as np
 from PIL import Image
+from pydicom.uid import generate_uid
+from test_image_dicom import _write_slice
 
-from pc_recurrence.image_roi.artifacts import save_case_artifacts
+from pc_recurrence.image_roi.artifacts import (
+    render_dicom_series_preview,
+    save_case_artifacts,
+)
 from pc_recurrence.image_roi.processing import expanded_bounding_box
 
 
@@ -48,3 +53,25 @@ def test_detected_case_artifacts_are_aligned_and_rendered(tmp_path: Path) -> Non
     with Image.open(tmp_path / "review_montage.png") as montage:
         assert montage.width > montage.height
         assert montage.width >= 1000
+
+
+def test_dicom_series_preview_is_labeled_three_by_three_montage(tmp_path: Path) -> None:
+    series_uid = generate_uid()
+    files: list[Path] = []
+    for index in range(1, 11):
+        path = tmp_path / f"IM{index:03d}.dcm"
+        _write_slice(
+            path,
+            series_uid=series_uid,
+            z=float(index),
+            stored_value=index,
+            instance_number=index,
+        )
+        files.append(path)
+    output = render_dicom_series_preview(
+        files, tmp_path / "preview.png", title="Patient 1 / candidate"
+    )
+    with Image.open(output) as preview:
+        assert preview.width > 1000
+        assert preview.height > 1000
+        assert 0.75 < preview.width / preview.height < 1.1

@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 
 from pc_recurrence.image_roi import pipeline
-from pc_recurrence.image_roi.dicom import DicomVolume, SeriesInspection
+from pc_recurrence.image_roi.dicom import DicomVolume, SeriesInspection, SeriesKey
 from pc_recurrence.image_roi.model import RuntimeInfo, SegmentationResult
 
 
@@ -14,6 +14,7 @@ def _inspection(patient_dir: Path) -> SeriesInspection:
     return SeriesInspection(
         patient_id="Patient 1",
         patient_dir=patient_dir,
+        study_uid="study",
         series_uid="series",
         file_count=2,
         shape=(8, 8, 8),
@@ -45,6 +46,7 @@ def test_negative_case_creates_no_patient_artifacts_and_resumes(
     )
     volume = DicomVolume(
         patient_id="Patient 1",
+        study_uid="study",
         series_uid="series",
         volume_hu=np.zeros((8, 8, 8), dtype=np.float32),
         affine_ras=np.eye(4),
@@ -59,10 +61,16 @@ def test_negative_case_creates_no_patient_artifacts_and_resumes(
         patch_count=1,
         inference_seconds=0.1,
     )
+    loaded_selections: list[SeriesKey] = []
+
+    def load_volume(*_args, **kwargs):
+        loaded_selections.append(kwargs["selection"])
+        return volume
+
     monkeypatch.setattr(pipeline, "inspect_dataset", lambda *_args, **_kwargs: [inspection])
     monkeypatch.setattr(pipeline, "acquire_model", lambda *_args, **_kwargs: model_path)
     monkeypatch.setattr(pipeline, "validate_and_load_runtime", lambda _path: (object(), runtime))
-    monkeypatch.setattr(pipeline, "load_dicom_volume", lambda *_args, **_kwargs: volume)
+    monkeypatch.setattr(pipeline, "load_dicom_volume", load_volume)
     monkeypatch.setattr(pipeline, "series_sha256", lambda _files: "checksum")
     monkeypatch.setattr(pipeline, "segment_volume", lambda *_args, **_kwargs: segmentation)
 
@@ -73,6 +81,7 @@ def test_negative_case_creates_no_patient_artifacts_and_resumes(
         tmp_path / "models",
         run_dir=run_dir,
     )
+    assert loaded_selections == [SeriesKey("study", "series")]
 
     assert not (run_dir / "Patient 1").exists()
     manifest = json.loads((run_dir / "run_manifest.json").read_text(encoding="utf-8"))
@@ -93,6 +102,56 @@ def test_negative_case_creates_no_patient_artifacts_and_resumes(
     assert not (run_dir / "Patient 1").exists()
 
 
+def test_resume_is_invalidated_when_study_series_identity_changes(
+    tmp_path: Path, monkeypatch
+) -> None:
+    state_path = tmp_path / "state.json"
+    patient_output = tmp_path / "patient"
+    patient_output.mkdir()
+    state_path.write_text(
+        json.dumps(
+            {
+                "status": "detected",
+                "record": {
+                    "inspection": {
+                        "study_uid": "old-study",
+                        "series_uid": "series",
+                        "selected_sop_instance_uids": ["one", "two"],
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert (
+        pipeline._resume_state(
+            state_path,
+            patient_output,
+            SeriesKey("old-study", "series"),
+            ("one", "two"),
+        )
+        is not None
+    )
+    assert (
+        pipeline._resume_state(
+            state_path,
+            patient_output,
+            SeriesKey("new-study", "series"),
+            ("one", "two"),
+        )
+        is None
+    )
+    assert (
+        pipeline._resume_state(
+            state_path,
+            patient_output,
+            SeriesKey("old-study", "series"),
+            ("one", "changed"),
+        )
+        is None
+    )
+
+
 def test_pancreas_target_creates_roi_without_tumor(tmp_path: Path, monkeypatch) -> None:
     patient_dir = tmp_path / "dicom" / "Patient 1"
     patient_dir.mkdir(parents=True)
@@ -111,6 +170,7 @@ def test_pancreas_target_creates_roi_without_tumor(tmp_path: Path, monkeypatch) 
     )
     volume = DicomVolume(
         patient_id="Patient 1",
+        study_uid="study",
         series_uid="series",
         volume_hu=np.zeros((8, 8, 8), dtype=np.float32),
         affine_ras=np.eye(4),
@@ -146,8 +206,12 @@ def test_pancreas_target_creates_roi_without_tumor(tmp_path: Path, monkeypatch) 
     assert patient_output.is_dir()
     assert (patient_output / "review_montage.png").is_file()
     bbox = json.loads((patient_output / "bbox.json").read_text(encoding="utf-8"))
+    assert bbox["study_uid"] == "study"
+    assert bbox["series_uid"] == "series"
     assert bbox["roi_target"] == "pancreas"
     assert bbox["roi_volume_mm3"] == 72.0
     manifest = json.loads((run_dir / "run_manifest.json").read_text(encoding="utf-8"))
     assert manifest["roi_target"] == "pancreas"
     assert manifest["status_counts"] == {"detected": 1}
+    assert manifest["patients"][0]["inspection"]["study_uid"] == "study"
+    assert manifest["patients"][0]["inspection"]["series_uid"] == "series"

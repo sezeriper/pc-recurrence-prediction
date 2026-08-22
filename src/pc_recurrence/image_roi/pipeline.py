@@ -31,6 +31,7 @@ from .constants import (
 )
 from .dicom import (
     SeriesInspection,
+    SeriesKey,
     inspect_patient,
     load_dicom_volume,
     patient_directories,
@@ -41,24 +42,6 @@ from .processing import expanded_bounding_box, select_tumor_component, voxel_vol
 from .workbook import load_image_workbook
 
 
-def workbook_entries(workbook_path: Path) -> dict[str, dict[str, str | None]]:
-    """Map workbook patient IDs and DICOM folder names to image-range rows."""
-    entries: dict[str, dict[str, str | None]] = {}
-    for row in load_image_workbook(workbook_path):
-        entry = {
-            "patient_id": row.patient_id,
-            "image_range_raw": (
-                row.image_range_raw
-                if isinstance(row.image_range_raw, str) and row.image_range_raw.strip()
-                else None
-            ),
-        }
-        entries[row.patient_id] = entry
-        if row.dicom_folder:
-            entries[row.dicom_folder] = entry
-    return entries
-
-
 def inspect_dataset(
     dicom_root: Path,
     patients: set[str] | None = None,
@@ -67,13 +50,19 @@ def inspect_dataset(
     directories = patient_directories(dicom_root)
     if patients is not None:
         directories = [path for path in directories if path.name in patients]
-    entries = workbook_entries(workbook_path) if workbook_path else {}
+    patient_ids = (
+        {
+            row.dicom_folder: row.patient_id
+            for row in load_image_workbook(workbook_path)
+            if row.dicom_folder is not None
+        }
+        if workbook_path
+        else {}
+    )
     return [
         inspect_patient(
             path,
-            patient_id=(
-                entries[path.name]["patient_id"] if path.name in entries else path.name
-            ),
+            patient_id=patient_ids.get(path.name, path.name),
         )
         for path in directories
     ]
@@ -84,6 +73,7 @@ def _inspection_row(inspection: SeriesInspection) -> dict[str, Any]:
         "patient_id": inspection.patient_id,
         "status": inspection.geometry_status,
         "reason": inspection.reason,
+        "study_uid": inspection.study_uid,
         "series_uid": inspection.series_uid,
         "dicom_file_count": inspection.file_count,
         "native_shape": inspection.shape,
@@ -126,17 +116,19 @@ def write_inspection_run(
 def _resume_state(
     state_path: Path,
     patient_dir: Path,
+    selection: SeriesKey,
     selected_sop_instance_uids: tuple[str, ...],
 ) -> dict[str, Any] | None:
     if not state_path.exists():
         return None
     state = read_json(state_path)
-    cached_sop_uids = (
-        state.get("record", {})
-        .get("inspection", {})
-        .get("selected_sop_instance_uids", [])
-    )
-    if cached_sop_uids != list(selected_sop_instance_uids):
+    cached_inspection = state.get("record", {}).get("inspection", {})
+    if (
+        cached_inspection.get("study_uid") != selection.study_uid
+        or cached_inspection.get("series_uid") != selection.series_uid
+        or cached_inspection.get("selected_sop_instance_uids", [])
+        != list(selected_sop_instance_uids)
+    ):
         return None
     if state.get("status") == "detected" and not patient_dir.exists():
         return None
@@ -172,14 +164,20 @@ def run_segmentation(
     for inspection in inspections:
         state_path = state_dir / f"{inspection.patient_id}.json"
         patient_output = destination / inspection.patient_id
+        selection_key = (
+            SeriesKey(inspection.study_uid, inspection.series_uid)
+            if inspection.study_uid is not None and inspection.series_uid is not None
+            else None
+        )
         if force:
             if patient_output.exists():
                 shutil.rmtree(patient_output)
             state_path.unlink(missing_ok=True)
-        if resume and not force:
+        if resume and not force and selection_key is not None:
             cached = _resume_state(
                 state_path,
                 patient_output,
+                selection_key,
                 inspection.selected_sop_instance_uids,
             )
             if cached is not None:
@@ -211,12 +209,14 @@ def run_segmentation(
             rows.append(summary)
             patient_records.append(record)
             continue
+        assert selection_key is not None
 
         try:
             started = time.perf_counter()
             volume = load_dicom_volume(
                 inspection.patient_dir,
                 patient_id=inspection.patient_id,
+                selection=selection_key,
             )
             dicom_checksum = series_sha256(volume.files)
             segmentation = segment_volume(model, volume.volume_hu, volume.affine_ras)
@@ -258,6 +258,7 @@ def run_segmentation(
                 bbox_metadata = {
                     **bbox.to_dict(),
                     "patient_id": volume.patient_id,
+                    "study_uid": volume.study_uid,
                     "series_uid": volume.series_uid,
                     "selected_component": selection.selected_component,
                     "roi_target": ROI_TARGET,

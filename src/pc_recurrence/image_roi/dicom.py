@@ -14,10 +14,39 @@ class DicomGeometryError(ValueError):
     """Raised when a CT series cannot be represented as one regular volume."""
 
 
+CT_IMAGE_STORAGE_UID = "1.2.840.10008.5.1.4.1.1.2"
+
+
+@dataclass(frozen=True, order=True)
+class SeriesKey:
+    study_uid: str
+    series_uid: str
+
+
+@dataclass
+class DicomSeries:
+    key: SeriesKey
+    headers: list[tuple[Path, Any]]
+    sop_class_uid: str
+    source_file_count: int
+    duplicate_file_count: int
+    source_directories: tuple[str, ...]
+    problems: tuple[str, ...]
+
+
+@dataclass
+class SeriesDiscovery:
+    patient_dir: Path
+    series: list[DicomSeries]
+    ignored_file_count: int
+    issues: tuple[str, ...]
+
+
 @dataclass(frozen=True)
 class SeriesInspection:
     patient_id: str
     patient_dir: Path
+    study_uid: str | None
     series_uid: str | None
     file_count: int
     shape: tuple[int, int, int] | None
@@ -43,6 +72,7 @@ class SeriesInspection:
 @dataclass
 class DicomVolume:
     patient_id: str
+    study_uid: str
     series_uid: str
     volume_hu: np.ndarray
     affine_ras: np.ndarray
@@ -68,25 +98,139 @@ def patient_directories(dicom_root: Path) -> list[Path]:
     return sorted((path for path in dicom_root.iterdir() if path.is_dir()), key=natural_patient_key)
 
 
-def _read_headers(patient_dir: Path) -> dict[str, list[tuple[Path, Any]]]:
-    groups: dict[str, list[tuple[Path, Any]]] = {}
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _series_number_sort_value(series: DicomSeries) -> tuple[int, float]:
+    value = getattr(series.headers[0][1], "SeriesNumber", None)
+    try:
+        return 0, float(value)
+    except (TypeError, ValueError):
+        return 1, 0.0
+
+
+def discover_dicom_series(patient_dir: Path) -> SeriesDiscovery:
+    """Recursively discover and deduplicate CT Series by DICOM identity."""
+    grouped: dict[SeriesKey, list[tuple[Path, Any]]] = {}
+    ignored_file_count = 0
+    issues: list[str] = []
     for path in sorted(item for item in patient_dir.rglob("*") if item.is_file()):
         try:
             dataset = pydicom.dcmread(path, stop_before_pixels=True, force=True)
         except Exception:
+            ignored_file_count += 1
             continue
-        if str(getattr(dataset, "Modality", "")).upper() != "CT":
+        study_uid = str(getattr(dataset, "StudyInstanceUID", "")).strip()
+        series_uid = str(getattr(dataset, "SeriesInstanceUID", "")).strip()
+        sop_uid = str(getattr(dataset, "SOPInstanceUID", "")).strip()
+        modality = str(getattr(dataset, "Modality", "")).strip().upper()
+        if not study_uid or not series_uid or not sop_uid or not modality:
+            ignored_file_count += 1
             continue
-        uid = str(getattr(dataset, "SeriesInstanceUID", "missing-series-uid"))
-        groups.setdefault(uid, []).append((path, dataset))
-    return groups
+        if modality != "CT":
+            ignored_file_count += 1
+            continue
+        grouped.setdefault(SeriesKey(study_uid, series_uid), []).append((path, dataset))
+
+    discovered: list[DicomSeries] = []
+    for key, source_headers in grouped.items():
+        by_sop: dict[str, list[tuple[Path, Any]]] = {}
+        for path, dataset in source_headers:
+            by_sop.setdefault(str(dataset.SOPInstanceUID), []).append((path, dataset))
+        retained: list[tuple[Path, Any]] = []
+        duplicate_count = 0
+        problems: list[str] = []
+        for sop_uid, copies in by_sop.items():
+            retained.append(copies[0])
+            if len(copies) == 1:
+                continue
+            duplicate_count += len(copies) - 1
+            hashes = {_file_sha256(path) for path, _ in copies}
+            if len(hashes) != 1:
+                problems.append(f"SOPInstanceUID {sop_uid} has conflicting file bytes")
+        instance_numbers: list[int] = []
+        for _path, dataset in retained:
+            try:
+                instance_numbers.append(int(dataset.InstanceNumber))
+            except Exception:
+                continue
+        if len(instance_numbers) != len(set(instance_numbers)):
+            problems.append("duplicate InstanceNumber values belong to distinct SOPInstanceUIDs")
+        sop_classes = {str(getattr(dataset, "SOPClassUID", "")).strip() for _, dataset in retained}
+        if "" in sop_classes:
+            problems.append("missing SOPClassUID")
+            sop_classes.discard("")
+        if len(sop_classes) > 1:
+            problems.append("Series contains multiple SOPClassUID values")
+        source_directories = tuple(
+            sorted(
+                {str(path.parent.relative_to(patient_dir)) or "." for path, _ in source_headers},
+                key=natural_patient_key,
+            )
+        )
+        discovered.append(
+            DicomSeries(
+                key=key,
+                headers=retained,
+                sop_class_uid=next(iter(sop_classes), ""),
+                source_file_count=len(source_headers),
+                duplicate_file_count=duplicate_count,
+                source_directories=source_directories,
+                problems=tuple(problems),
+            )
+        )
+    discovered.sort(
+        key=lambda series: (
+            _series_number_sort_value(series),
+            tuple(natural_patient_key(path) for path in series.source_directories),
+            series.key.study_uid,
+            series.key.series_uid,
+        )
+    )
+    if ignored_file_count:
+        issues.append(f"ignored {ignored_file_count} files without usable CT DICOM identity")
+    return SeriesDiscovery(
+        patient_dir=patient_dir,
+        series=discovered,
+        ignored_file_count=ignored_file_count,
+        issues=tuple(issues),
+    )
 
 
-def _largest_ct_series(patient_dir: Path) -> tuple[str, list[tuple[Path, Any]]]:
-    groups = _read_headers(patient_dir)
-    if not groups:
-        raise DicomGeometryError("no CT DICOM series found")
-    return max(groups.items(), key=lambda item: (len(item[1]), item[0]))
+def _resolve_series(patient_dir: Path, selection: SeriesKey | None) -> DicomSeries:
+    discovery = discover_dicom_series(patient_dir)
+    processable = [
+        series
+        for series in discovery.series
+        if series.sop_class_uid == CT_IMAGE_STORAGE_UID and not series.problems
+    ]
+    if selection is None:
+        if not processable:
+            raise DicomGeometryError("no processable CT DICOM Series found")
+        if len(processable) != 1:
+            raise DicomGeometryError(
+                f"expected exactly one CT DICOM Series; found {len(processable)}"
+            )
+        return processable[0]
+    for series in discovery.series:
+        if series.key == selection:
+            if series.sop_class_uid != CT_IMAGE_STORAGE_UID:
+                raise DicomGeometryError(
+                    f"selected CT DICOM Series uses unsupported SOPClassUID "
+                    f"{series.sop_class_uid or '<missing>'}"
+                )
+            if series.problems:
+                raise DicomGeometryError("; ".join(series.problems))
+            return series
+    raise DicomGeometryError(
+        f"selected CT DICOM Series not found: StudyInstanceUID={selection.study_uid}, "
+        f"SeriesInstanceUID={selection.series_uid}"
+    )
 
 
 def parse_image_range(value: str) -> tuple[int, int]:
@@ -145,16 +289,12 @@ def _select_instance_range(
 
 def select_series_files(
     patient_dir: Path,
+    selection: SeriesKey,
     image_range_raw: str | None = None,
 ) -> tuple[list[Path], tuple[int, ...], tuple[str, ...]]:
-    """Select the largest CT series files for a patient directory.
-
-    Uses the exact segmentation-pipeline policy: one-based inclusive ordinals
-    after ascending DICOM InstanceNumber. Returns the selected file paths in
-    instance order, their instance numbers, and their SOP Instance UIDs.
-    """
-    _, headers = _largest_ct_series(patient_dir)
-    selected, instance_numbers, sop_uids = _select_instance_range(headers, image_range_raw)
+    """Resolve an exact Series and apply one-based inclusive InstanceNumber ordinals."""
+    series = _resolve_series(patient_dir, selection)
+    selected, instance_numbers, sop_uids = _select_instance_range(series.headers, image_range_raw)
     return [path for path, _ in selected], instance_numbers, sop_uids
 
 
@@ -248,15 +388,18 @@ def inspect_patient(
     patient_dir: Path,
     *,
     patient_id: str | None = None,
+    selection: SeriesKey | None = None,
 ) -> SeriesInspection:
     patient_id = patient_dir.name if patient_id is None else patient_id
-    uid: str | None = None
+    key: SeriesKey | None = selection
     headers: list[tuple[Path, Any]] = []
     selected: list[tuple[Path, Any]] = []
     instance_numbers: tuple[int, ...] = ()
     sop_uids: tuple[str, ...] = ()
     try:
-        uid, headers = _largest_ct_series(patient_dir)
+        series = _resolve_series(patient_dir, selection)
+        key = series.key
+        headers = series.headers
         selected, instance_numbers, sop_uids = _select_instance_range(headers, None)
         (
             ordered,
@@ -280,7 +423,8 @@ def inspect_patient(
         return SeriesInspection(
             patient_id=patient_id,
             patient_dir=patient_dir,
-            series_uid=uid,
+            study_uid=key.study_uid,
+            series_uid=key.series_uid,
             file_count=len(ordered),
             shape=shape,
             spacing_mm=(row_spacing, column_spacing, spacing_z),
@@ -292,22 +436,17 @@ def inspect_patient(
             selected_sop_instance_uids=sop_uids,
         )
     except DicomGeometryError as exc:
-        if not headers:
-            groups = _read_headers(patient_dir)
-            if groups:
-                uid, headers = max(groups.items(), key=lambda item: (len(item[1]), item[0]))
-        selected_count = len(selected) if selected else len(headers)
-        status = "skipped_geometry_gap" if "discontinuous stack" in str(exc) else "invalid_geometry"
         return SeriesInspection(
             patient_id=patient_id,
             patient_dir=patient_dir,
-            series_uid=uid,
-            file_count=selected_count,
+            study_uid=key.study_uid if key else None,
+            series_uid=key.series_uid if key else None,
+            file_count=len(selected) if selected else len(headers),
             shape=None,
             spacing_mm=None,
             median_slice_spacing_mm=None,
             maximum_slice_gap_mm=None,
-            geometry_status=status,
+            geometry_status="invalid_geometry",
             reason=str(exc),
             selected_instance_numbers=instance_numbers,
             selected_sop_instance_uids=sop_uids,
@@ -318,9 +457,10 @@ def load_dicom_volume(
     patient_dir: Path,
     *,
     patient_id: str | None = None,
+    selection: SeriesKey | None = None,
 ) -> DicomVolume:
-    uid, headers = _largest_ct_series(patient_dir)
-    selected, instance_numbers, sop_uids = _select_instance_range(headers, None)
+    series = _resolve_series(patient_dir, selection)
+    selected, instance_numbers, sop_uids = _select_instance_range(series.headers, None)
     (
         ordered,
         row_direction,
@@ -351,7 +491,8 @@ def load_dicom_volume(
     affine_ras = lps_to_ras @ affine_lps
     return DicomVolume(
         patient_id=patient_dir.name if patient_id is None else patient_id,
-        series_uid=uid,
+        study_uid=series.key.study_uid,
+        series_uid=series.key.series_uid,
         volume_hu=volume,
         affine_ras=affine_ras,
         spacing_mm=(row_spacing, column_spacing, spacing_z),

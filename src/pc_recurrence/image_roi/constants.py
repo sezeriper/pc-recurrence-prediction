@@ -26,10 +26,14 @@ MIN_TUMOR_VOLUME_MM3 = 100.0
 MAX_PANCREAS_DISTANCE_MM = 5.0
 ROI_MARGIN_MM = 15.0
 
-# Curated folder created by `pc-image-roi preprocess`; all tasks read from here.
-DEFAULT_DICOM_ROOT = Path("dataset/dicom_selected")
-# Untouched original anonymized folders; the preprocess command reads from here.
-DEFAULT_SOURCE_DICOM_ROOT = Path("dataset/dicom_anon")
-DEFAULT_WORKBOOK = Path("dataset/pankreas adeno ca 10 hasta.xlsx")
+# Cleaned dataset wrapper used by the source workbook and DICOM folders.
+DEFAULT_DATASET_ROOT = Path("dataset/Anonimleştirilmiş")
+# Curated folder created by `pc-image-roi preprocess`; all downstream tasks read from here.
+DEFAULT_DICOM_ROOT = Path("outputs/dicom_selected")
+# Untouched original anonymized folders; inventory and preprocess only read from here.
+DEFAULT_SOURCE_DICOM_ROOT = DEFAULT_DATASET_ROOT / "dicom_anon"
+DEFAULT_WORKBOOK = DEFAULT_DATASET_ROOT / "pankreas adeno ca 10 hasta.xlsx"
+DEFAULT_SCAN_REVIEW_ROOT = Path("outputs/ct_series_review")
+DEFAULT_SCAN_SELECTION = DEFAULT_SCAN_REVIEW_ROOT / "scan_selection.csv"
 DEFAULT_OUTPUT_ROOT = Path("outputs/image_roi")
 DEFAULT_MODEL_CACHE = Path(".cache/monai_models")

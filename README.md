@@ -32,28 +32,62 @@ uv pip install `
 
 The image pipeline uses the pinned MONAI `pancreas_ct_dints_segmentation` TorchScript bundle.
 
-Create the curated slice folder first; every image task reads from it by default afterwards:
+Source DICOM and the workbook are read from `dataset/`, which remains read-only. Generated review,
+curated DICOM, model, and run artifacts default to `outputs/` or `.cache/`; no default command
+writes inside `dataset/`.
+
+Create an operator review inventory before curating any slices:
+
+```powershell
+uv run pc-image-roi inventory
+```
+
+This CPU-only command scans the untouched cleaned source recursively and writes
+`outputs/ct_series_review/scan_selection.csv` plus axial montages under
+`outputs/ct_series_review/previews/`. A DICOM Study groups an imaging encounter; a Series identifies
+one acquisition within that Study. Review the Study/Series descriptions, `status`, concrete
+`reason`, geometry warnings, and preview for every candidate.
+`ready` means the classic single-frame CT Series can map the
+workbook's one-based inclusive `Görüntü alanı` ordinals after ascending `InstanceNumber`.
+`not_selectable` candidates remain visible for audit, including unsupported dose-report objects.
+`no_series` identifies a missing folder or a folder without usable CT DICOM.
+
+Open the loopback-only montage reviewer for that existing inventory:
+
+```powershell
+uv run pc-image-roi review
+```
+
+The reviewer keeps every patient and Series in inventory order, shows the original montage at full
+resolution, and changes only `selected` cells when **Save selections** is pressed. It never chooses
+a Series automatically. Partial progress and explicit clears are allowed; use `--selection FILE`
+for another inventory, `--port` for a different loopback port, or `--no-open-browser` to print the
+URL without launching a browser.
+
+Choose exactly one `ready` row per patient in the reviewer, or set `selected=yes` directly in the
+CSV and leave every other `selected` cell blank. Then curate:
 
 ```powershell
 uv run pc-image-roi preprocess
 ```
 
-The preprocess command reads `Görüntü alanı` from the workbook as one-based inclusive ordinals
-after ascending DICOM `InstanceNumber`, copies the selected slices from the untouched originals
-under `dataset/dicom_anon/PATIENT<hasta no>` into `dataset/dicom_selected/PATIENT<hasta no>`, and
-records every copy in `dataset/dicom_selected/curation_manifest.json`. Re-running is idempotent
-(byte-identical files are skipped; `--force` re-copies). Patients whose folder or range is missing
-or whose range is invalid are recorded as skips without aborting the run; geometry eligibility is
-documented per patient but does not gate the copy. `--patients "Patient 1,PATIENT853534"` accepts
-workbook IDs or DICOM folder names for a subset.
+Preprocessing validates the complete CSV against the live source before touching the curated
+output under `outputs/dicom_selected`.
+An added/removed Series, changed SOP membership, changed file counts, or changed workbook range
+makes the selection stale and requires rerunning `inventory`. The chosen Study+Series is
+deduplicated by SOP Instance UID only when duplicate files are byte-identical, the workbook range
+is applied within that Series, and the exact resulting file set replaces any older curated range
+atomically. Existing `scan_selection.csv` review work is protected unless `inventory --force` is
+used; that flag deliberately resets selections and previews. Preprocessing `--force` stages and
+rebuilds the exact selected output.
 
-Audit DICOM geometry without inference, run using an already cached model, or acquire the pinned
-model and run the complete pipeline. These commands default to the curated folder, which already
-contains exactly the table-defined slices, and reorder them by physical position for loading. Every
-slice range is accepted regardless of slice-position gaps or other geometry anomalies; anomalies
-are recorded as per-patient warnings instead of skip reasons. The workbook's `hasta no` column
-links each row to its anonymized CT folder; the image pipeline resolves that mapping automatically
-and keeps the workbook `hasta id` (`Patient N`) as the aligned patient ID in all downstream
+Both commands accept `--patients "Patient 1,PATIENT853534"` with workbook IDs or DICOM folder
+aliases. Inventory and preprocessing then require choices only for that explicit subset. Use the
+same subset for both commands.
+
+`inspect` and segmentation consume only the curated one-Series patient directories. They never
+choose a larger Series or repeat the operator's selection. Study UID, Series UID, selected SOP
+Instance UIDs, and geometry warnings remain in inspection, segmentation, state, and bounding-box
 artifacts.
 
 ```powershell
@@ -66,19 +100,17 @@ uv run pc-image-roi run
 Use `--patients "Patient 1,Patient 3"` (workbook IDs) or `--patients "PATIENT2321275"` (DICOM
 folder names) for a subset. `--force` replaces cached state within the selected run. There is no
 CPU fallback: segmentation stops if the exact ROCm build, RX 6900 XT, or minimum free-memory
-requirement is unavailable. In the current pilot, Patient 1 has no CT folder and Patient 10 is
-accepted despite the 64 mm gap between its two acquisition blocks, so 9 of 10 workbook rows are
-eligible.
+requirement is unavailable.
 
 Every run centers the ROI on the predicted pancreas; tumor-centered ROIs are not produced. Patients
 without a pancreas prediction produce no ROI artifacts.
 
-The preprocess step strictly skips missing/invalid and out-of-bounds ranges; the pipeline accepts
-every curated range and only skips folders with no CT series or no requested mask. Its manifest
-records the selected instance numbers, SOP Instance UIDs, and any geometry warnings. Each detected
-case contains the full-volume pancreas mask, the pancreas-centered cropped CT and mask, physical
-bounding-box metadata, and an axial/coronal/sagittal review montage. All masks and ROIs are
-provisional research outputs and must not be used diagnostically.
+Preprocessing fails closed unless every targeted patient has one live `ready` choice. Geometry
+gaps and duplicate slice positions are warnings rather than selection blockers. The segmentation
+pipeline skips folders with zero or multiple processable CT Series instead of selecting one
+implicitly. Each detected case contains the full-volume pancreas mask, the pancreas-centered
+cropped CT and mask, physical bounding-box metadata, and an axial/coronal/sagittal review montage.
+All masks and ROIs are provisional research outputs and must not be used diagnostically.
 
 ## Image embeddings
 
