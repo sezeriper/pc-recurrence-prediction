@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import csv
-import hashlib
 import json
 import shutil
 import uuid
@@ -10,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from pc_recurrence import __version__
+from pc_recurrence.io import sha256_file
 
 from .dicom import DicomGeometryError, discover_dicom_series, inspect_patient, select_series_files
 from .scan_selection import PatientSeriesSelection, load_scan_selections, series_sop_uids_sha256
@@ -90,9 +90,9 @@ class CurationReport:
             "dicom_root": str(self.dicom_root.resolve()),
             "output_root": str(self.output_root.resolve()),
             "workbook": str(self.workbook_path.resolve()),
-            "workbook_sha256": _file_sha256(self.workbook_path),
+            "workbook_sha256": sha256_file(self.workbook_path),
             "selection_path": str(self.selection_path.resolve()),
-            "selection_sha256": _file_sha256(self.selection_path),
+            "selection_sha256": sha256_file(self.selection_path),
             "policy": {
                 "series_selection": "exact StudyInstanceUID and SeriesInstanceUID",
                 "duplicate_policy": "byte-identical SOPInstanceUID copies collapse to one file",
@@ -128,14 +128,6 @@ SUMMARY_COLUMNS = (
     "source_dir",
     "destination_dir",
 )
-
-
-def _file_sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for block in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
 
 
 def _skipped_patient(
@@ -174,12 +166,22 @@ def _curate_patient(
 ) -> CuratedPatient:
     source_dir = dicom_root / selection.dicom_folder
     destination_dir = output_root / selection.dicom_folder
-    series = next(
-        item for item in discover_dicom_series(source_dir).series if item.key == selection.key
-    )
     try:
+        series = next(
+            item
+            for item in discover_dicom_series(source_dir).series
+            if item.key == selection.key
+        )
         files, instance_numbers, sop_uids = select_series_files(
             source_dir, selection.key, row.image_range_raw
+        )
+    except StopIteration:
+        return _skipped_patient(
+            row,
+            selection,
+            reason="selected CT DICOM Series not found in source directory",
+            source_dir=source_dir,
+            destination_dir=destination_dir,
         )
     except DicomGeometryError as exc:
         return _skipped_patient(
@@ -198,7 +200,7 @@ def _curate_patient(
             source_dir=source_dir,
             destination_dir=destination_dir,
         )
-    desired_hashes = {path.name: _file_sha256(path) for path in files}
+    desired_hashes = {path.name: sha256_file(path) for path in files}
     destination_matches = False
     if destination_dir.is_dir() and not force:
         entries = list(destination_dir.iterdir())
@@ -207,7 +209,7 @@ def _curate_patient(
             len(existing) == len(entries)
             and set(existing) == set(desired_hashes)
             and all(
-                _file_sha256(existing[name]) == digest for name, digest in desired_hashes.items()
+                sha256_file(existing[name]) == digest for name, digest in desired_hashes.items()
             )
         )
     if destination_matches:
@@ -233,7 +235,7 @@ def _curate_patient(
             for path in files:
                 staged = staging_dir / path.name
                 shutil.copy2(path, staged)
-                if _file_sha256(staged) != desired_hashes[path.name]:
+                if sha256_file(staged) != desired_hashes[path.name]:
                     raise RuntimeError(f"SHA-256 mismatch after copy for {path.name}")
             if replacement:
                 destination_dir.replace(backup_dir)

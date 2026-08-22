@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import math
 import time
 from dataclasses import dataclass
@@ -14,6 +13,7 @@ from huggingface_hub import hf_hub_download
 from monai.inferers import sliding_window_inference
 from nibabel.processing import resample_from_to, resample_to_output
 
+from pc_recurrence.io import sha256_file
 from pc_recurrence.runtime import device_memory_info, select_device
 
 from .constants import (
@@ -58,14 +58,6 @@ class SegmentationResult:
     inference_seconds: float
 
 
-def sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for block in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest().upper()
-
-
 def acquire_model(cache_dir: Path, *, local_files_only: bool = False) -> Path:
     cache_dir.mkdir(parents=True, exist_ok=True)
     path = Path(
@@ -78,7 +70,7 @@ def acquire_model(cache_dir: Path, *, local_files_only: bool = False) -> Path:
         )
     )
     actual = sha256_file(path)
-    if actual != MODEL_SHA256:
+    if actual.casefold() != MODEL_SHA256.casefold():
         raise RuntimeValidationError(
             f"model checksum mismatch: expected {MODEL_SHA256}, received {actual}"
         )
@@ -87,7 +79,7 @@ def acquire_model(cache_dir: Path, *, local_files_only: bool = False) -> Path:
 
 def validate_and_load_runtime(model_path: Path) -> tuple[torch.jit.ScriptModule, RuntimeInfo]:
     actual = sha256_file(model_path)
-    if actual != MODEL_SHA256:
+    if actual.casefold() != MODEL_SHA256.casefold():
         raise RuntimeValidationError(
             f"model checksum mismatch: expected {MODEL_SHA256}, received {actual}"
         )

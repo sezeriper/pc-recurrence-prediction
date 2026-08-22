@@ -8,6 +8,7 @@ from typing import Any
 from pc_recurrence import __version__
 
 from .artifacts import (
+    SEGMENTATION_SUMMARY_COLUMNS,
     create_run_directory,
     read_json,
     save_case_artifacts,
@@ -95,7 +96,9 @@ def write_inspection_run(
     workbook_path: Path | None = None,
 ) -> tuple[Path, Path]:
     rows = [_inspection_row(item) for item in inspections]
-    summary = write_summary(rows, run_dir / "segmentation_summary.csv")
+    summary = write_summary(
+        rows, run_dir / "segmentation_summary.csv", SEGMENTATION_SUMMARY_COLUMNS
+    )
     manifest = write_json(
         {
             "pipeline_version": __version__,
@@ -302,7 +305,7 @@ def run_segmentation(
         rows.append(summary)
         patient_records.append(record)
 
-    write_summary(rows, destination / "segmentation_summary.csv")
+    write_summary(rows, destination / "segmentation_summary.csv", SEGMENTATION_SUMMARY_COLUMNS)
     write_json(
         {
             "pipeline_version": __version__,

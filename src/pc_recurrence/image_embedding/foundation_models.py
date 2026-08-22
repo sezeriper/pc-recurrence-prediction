@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import time
 from collections import OrderedDict
 from dataclasses import dataclass
@@ -11,6 +10,7 @@ import numpy as np
 import torch
 from huggingface_hub import hf_hub_download
 
+from pc_recurrence.io import sha256_file
 from pc_recurrence.runtime import device_memory_info, inference_autocast, select_device
 
 from .constants import (
@@ -54,14 +54,6 @@ class RuntimeInfo:
         }
 
 
-def sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for block in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest().upper()
-
-
 @dataclass(frozen=True)
 class FoundationModelArtifacts:
     paths: tuple[Path, ...]
@@ -85,7 +77,7 @@ def _download_verified(
         )
     )
     actual = sha256_file(path)
-    if actual != expected_sha256:
+    if actual.casefold() != expected_sha256.casefold():
         raise RuntimeValidationError(
             f"model checksum mismatch for {filename}: expected {expected_sha256}, received {actual}"
         )

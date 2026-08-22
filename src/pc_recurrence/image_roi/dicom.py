@@ -9,6 +9,8 @@ from typing import Any
 import numpy as np
 import pydicom
 
+from pc_recurrence.io import sha256_file
+
 
 class DicomGeometryError(ValueError):
     """Raised when a CT series cannot be represented as one regular volume."""
@@ -98,14 +100,6 @@ def patient_directories(dicom_root: Path) -> list[Path]:
     return sorted((path for path in dicom_root.iterdir() if path.is_dir()), key=natural_patient_key)
 
 
-def _file_sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for block in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
-
-
 def _series_number_sort_value(series: DicomSeries) -> tuple[int, float]:
     value = getattr(series.headers[0][1], "SeriesNumber", None)
     try:
@@ -150,7 +144,7 @@ def discover_dicom_series(patient_dir: Path) -> SeriesDiscovery:
             if len(copies) == 1:
                 continue
             duplicate_count += len(copies) - 1
-            hashes = {_file_sha256(path) for path, _ in copies}
+            hashes = {sha256_file(path) for path, _ in copies}
             if len(hashes) != 1:
                 problems.append(f"SOPInstanceUID {sop_uid} has conflicting file bytes")
         instance_numbers: list[int] = []
@@ -246,7 +240,7 @@ def parse_image_range(value: str) -> tuple[int, int]:
     return start, stop
 
 
-def _select_instance_range(
+def select_instance_range(
     headers: list[tuple[Path, Any]], image_range_raw: str | None
 ) -> tuple[list[tuple[Path, Any]], tuple[int, ...], tuple[str, ...]]:
     if image_range_raw is None:
@@ -294,11 +288,11 @@ def select_series_files(
 ) -> tuple[list[Path], tuple[int, ...], tuple[str, ...]]:
     """Resolve an exact Series and apply one-based inclusive InstanceNumber ordinals."""
     series = _resolve_series(patient_dir, selection)
-    selected, instance_numbers, sop_uids = _select_instance_range(series.headers, image_range_raw)
+    selected, instance_numbers, sop_uids = select_instance_range(series.headers, image_range_raw)
     return [path for path, _ in selected], instance_numbers, sop_uids
 
 
-def _geometry(
+def series_geometry(
     headers: list[tuple[Path, Any]],
 ) -> tuple[
     list[tuple[Path, Any]],
@@ -400,7 +394,7 @@ def inspect_patient(
         series = _resolve_series(patient_dir, selection)
         key = series.key
         headers = series.headers
-        selected, instance_numbers, sop_uids = _select_instance_range(headers, None)
+        selected, instance_numbers, sop_uids = select_instance_range(headers, None)
         (
             ordered,
             _,
@@ -411,7 +405,7 @@ def inspect_patient(
             row_spacing,
             column_spacing,
             slice_warnings,
-        ) = _geometry(selected)
+        ) = series_geometry(selected)
         first = ordered[0][1]
         rows = getattr(first, "Rows", None)
         columns = getattr(first, "Columns", None)
@@ -460,7 +454,7 @@ def load_dicom_volume(
     selection: SeriesKey | None = None,
 ) -> DicomVolume:
     series = _resolve_series(patient_dir, selection)
-    selected, instance_numbers, sop_uids = _select_instance_range(series.headers, None)
+    selected, instance_numbers, sop_uids = select_instance_range(series.headers, None)
     (
         ordered,
         row_direction,
@@ -471,7 +465,7 @@ def load_dicom_volume(
         row_spacing,
         column_spacing,
         _,
-    ) = _geometry(selected)
+    ) = series_geometry(selected)
     slices: list[np.ndarray] = []
     for path, _ in ordered:
         dataset = pydicom.dcmread(path, force=True)

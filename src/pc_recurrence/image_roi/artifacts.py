@@ -1,8 +1,5 @@
 from __future__ import annotations
 
-import csv
-import json
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -17,63 +14,30 @@ import pydicom
 from matplotlib.colors import ListedColormap
 from matplotlib.patches import Rectangle
 
+from pc_recurrence.io import create_run_directory, read_json, write_json, write_summary
+
 from .processing import BoundingBox, crop_affine, crop_array
 
-
-def create_run_directory(output_root: Path) -> Path:
-    output_root.mkdir(parents=True, exist_ok=True)
-    base = datetime.now(UTC).strftime("run_%Y%m%dT%H%M%SZ")
-    candidate = output_root / base
-    suffix = 1
-    while candidate.exists():
-        candidate = output_root / f"{base}_{suffix:02d}"
-        suffix += 1
-    candidate.mkdir(parents=True)
-    return candidate
+__all__ = ["create_run_directory", "read_json", "write_json", "write_summary"]
 
 
-def write_json(data: dict[str, Any], path: Path) -> Path:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    temporary.replace(path)
-    return path
-
-
-def read_json(path: Path) -> dict[str, Any]:
-    return json.loads(path.read_text(encoding="utf-8"))
-
-
-def write_summary(rows: list[dict[str, Any]], path: Path) -> Path:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    columns = [
-        "patient_id",
-        "status",
-        "study_uid",
-        "reason",
-        "series_uid",
-        "dicom_file_count",
-        "native_shape",
-        "native_spacing_mm",
-        "maximum_slice_gap_mm",
-        "phase_status",
-        "preprocessed_shape",
-        "patch_count",
-        "inference_seconds",
-        "roi_volume_mm3",
-        "patient_artifact_dir",
-    ]
-    with path.open("w", encoding="utf-8-sig", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=columns, extrasaction="ignore")
-        writer.writeheader()
-        for row in rows:
-            serialized = row.copy()
-            for key in ("native_shape", "native_spacing_mm", "preprocessed_shape"):
-                value = serialized.get(key)
-                if value is not None and not isinstance(value, str):
-                    serialized[key] = "x".join(str(item) for item in value)
-            writer.writerow(serialized)
-    return path
+SEGMENTATION_SUMMARY_COLUMNS = (
+    "patient_id",
+    "status",
+    "study_uid",
+    "reason",
+    "series_uid",
+    "dicom_file_count",
+    "native_shape",
+    "native_spacing_mm",
+    "maximum_slice_gap_mm",
+    "phase_status",
+    "preprocessed_shape",
+    "patch_count",
+    "inference_seconds",
+    "roi_volume_mm3",
+    "patient_artifact_dir",
+)
 
 
 def save_nifti(array: np.ndarray, affine: np.ndarray, path: Path, dtype: np.dtype) -> Path:

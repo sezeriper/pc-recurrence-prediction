@@ -12,8 +12,16 @@ import nibabel as nib
 import numpy as np
 
 from pc_recurrence import __version__
+from pc_recurrence.image_roi.dicom import natural_patient_key
+from pc_recurrence.io import sha256_file
 
-from .artifacts import create_run_directory, write_json, write_npz, write_summary
+from .artifacts import (
+    EMBEDDING_SUMMARY_COLUMNS,
+    create_run_directory,
+    write_json,
+    write_npz,
+    write_summary,
+)
 from .constants import (
     MERLIN_EMBEDDING_DIMENSION,
     MERLIN_FILENAME,
@@ -37,7 +45,6 @@ from .foundation_models import (
     encode_merlin,
     encode_spectre,
     load_foundation_runtime,
-    sha256_file,
 )
 from .foundation_preprocessing import prepare_merlin_input, prepare_spectre_input
 
@@ -62,13 +69,6 @@ class CaseEncoding:
     record: dict[str, Any]
 
 
-def _patient_sort_key(value: str) -> tuple[str, int, str]:
-    prefix, separator, suffix = value.rpartition(" ")
-    if separator and suffix.isdigit():
-        return prefix.casefold(), int(suffix), value.casefold()
-    return value.casefold(), -1, value.casefold()
-
-
 def discover_roi_cases(roi_run: Path, patients: set[str] | None = None) -> list[RoiCase]:
     if not roi_run.is_dir():
         raise ValueError(f"ROI run directory does not exist: {roi_run}")
@@ -91,10 +91,10 @@ def discover_roi_cases(roi_run: Path, patients: set[str] | None = None) -> list[
                     roi_target,
                 )
             )
-    cases.sort(key=lambda case: _patient_sort_key(case.patient_id))
+    cases.sort(key=lambda case: natural_patient_key(case.patient_id))
     if patients is not None:
         found = {case.patient_id for case in cases}
-        missing = sorted(patients - found, key=_patient_sort_key)
+        missing = sorted(patients - found, key=natural_patient_key)
         if missing:
             raise ValueError(f"requested patients have no ROI CT artifact: {', '.join(missing)}")
     if not cases:
@@ -425,7 +425,7 @@ def run_embedding(
         valid_voxel_counts=valid_counts,
         embeddings=patch_embeddings,
     )
-    write_summary(rows, destination / "embedding_summary.csv")
+    write_summary(rows, destination / "embedding_summary.csv", EMBEDDING_SUMMARY_COLUMNS)
     source_manifest = roi_run / "run_manifest.json"
     status_counts = dict(Counter(row["status"] for row in rows))
     write_json(

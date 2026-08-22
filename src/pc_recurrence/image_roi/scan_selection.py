@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from pc_recurrence import __version__
+from pc_recurrence.io import sha256_file
 
 from .artifacts import render_dicom_series_preview, write_json
 from .dicom import (
@@ -18,9 +19,9 @@ from .dicom import (
     DicomGeometryError,
     DicomSeries,
     SeriesKey,
-    _geometry,
-    _select_instance_range,
     discover_dicom_series,
+    select_instance_range,
+    series_geometry,
 )
 from .workbook import ImageWorkbookRow, load_image_workbook, select_image_workbook_rows
 
@@ -95,14 +96,6 @@ class ScanInventoryReport:
     manifest_path: Path
 
 
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for block in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
-
-
 def candidate_id(key: SeriesKey) -> str:
     return hashlib.sha256(f"{key.study_uid}\n{key.series_uid}".encode()).hexdigest()
 
@@ -131,7 +124,7 @@ def _candidate_row(
         reasons.append("missing image range")
     if not reasons:
         try:
-            selected_headers, _, _ = _select_instance_range(
+            selected_headers, _, _ = select_instance_range(
                 series.headers, workbook_row.image_range_raw
             )
         except DicomGeometryError as exc:
@@ -155,7 +148,7 @@ def _candidate_row(
             _,
             _,
             geometry_warnings,
-        ) = _geometry(selected_headers)
+        ) = series_geometry(selected_headers)
         preview_files = [path for path, _ in ordered]
     except Exception as exc:
         if status == "ready":
@@ -303,9 +296,9 @@ def _write_csv_atomic(
             )
             writer.writeheader()
             writer.writerows(rows)
-        revision = _sha256(temporary)
+        revision = sha256_file(temporary)
         if expected_sha256 is not None:
-            current_revision = _sha256(path) if path.exists() else ""
+            current_revision = sha256_file(path) if path.exists() else ""
             if current_revision != expected_sha256:
                 raise ScanSelectionConflictError(
                     "scan selection changed on disk; reload before saving"
@@ -368,7 +361,7 @@ def write_scan_inventory(
         "stage": "ct_series_inventory",
         "dicom_root": str(dicom_root.resolve()),
         "workbook_path": str(workbook_path.resolve()),
-        "workbook_sha256": _sha256(workbook_path),
+        "workbook_sha256": sha256_file(workbook_path),
         "output_dir": str(output_dir.resolve()),
         "selection_path": str(selection_path.resolve()),
         "patient_count": len(workbook_rows),
