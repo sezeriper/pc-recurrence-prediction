@@ -186,7 +186,7 @@ def test_inventory_writes_blank_choices_previews_and_classifications(tmp_path: P
     workbook = tmp_path / "workbook.xlsx"
     _write_workbook(
         workbook,
-        [_row("Patient 1", 111, "1-3"), _row("Patient 2", 222, "1-2")],
+        [_row("Patient 1", 111, "0-2"), _row("Patient 2", 222, "0-1")],
     )
     review = tmp_path / "review"
 
@@ -214,7 +214,7 @@ def test_inventory_refuses_overwrite_before_artifact_changes(tmp_path: Path) -> 
     source = tmp_path / "dicom"
     _write_series(source, "PATIENT111", 3)
     workbook = tmp_path / "workbook.xlsx"
-    _write_workbook(workbook, [_row("Patient 1", 111, "1-2")])
+    _write_workbook(workbook, [_row("Patient 1", 111, "0-1")])
     review = tmp_path / "review"
     selection = _inventory(source, workbook, review)
     before = selection.read_bytes()
@@ -229,7 +229,7 @@ def test_selection_preflight_fails_before_output_mutation(tmp_path: Path, mode: 
     first = _write_series(source, "PATIENT111", 3, prefix="a", series_number=1)
     second = _write_series(source, "PATIENT111", 3, prefix="b", series_number=2)
     workbook = tmp_path / "workbook.xlsx"
-    _write_workbook(workbook, [_row("Patient 1", 111, "1-2")])
+    _write_workbook(workbook, [_row("Patient 1", 111, "0-1")])
     selection = _inventory(source, workbook, tmp_path / "review")
     rows = _read_csv(selection)
     if mode == "multiple":
@@ -251,7 +251,7 @@ def test_exact_choice_applies_range_and_replaces_prior_series(tmp_path: Path) ->
     first = _write_series(source, "PATIENT111", 5, prefix="first", series_number=1)
     second = _write_series(source, "PATIENT111", 4, prefix="second", series_number=2)
     workbook = tmp_path / "workbook.xlsx"
-    _write_workbook(workbook, [_row("Patient 1", 111, "2-3")])
+    _write_workbook(workbook, [_row("Patient 1", 111, "1-2")])
     review = tmp_path / "review"
     selection = _inventory(source, workbook, review)
     _select(selection, "Patient 1", first.series_uid)
@@ -281,7 +281,7 @@ def test_stale_selection_rejected_before_existing_output_changes(tmp_path: Path)
     source = tmp_path / "dicom"
     key = _write_series(source, "PATIENT111", 3)
     workbook = tmp_path / "workbook.xlsx"
-    _write_workbook(workbook, [_row("Patient 1", 111, "1-2")])
+    _write_workbook(workbook, [_row("Patient 1", 111, "0-1")])
     selection = _inventory(source, workbook, tmp_path / "review")
     _select(selection, "Patient 1", key.series_uid)
     output = tmp_path / "curated"
@@ -305,7 +305,7 @@ def test_curation_is_idempotent_forceful_and_records_provenance(tmp_path: Path) 
     source = tmp_path / "dicom"
     key = _write_series(source, "PATIENT111", 4)
     workbook = tmp_path / "workbook.xlsx"
-    _write_workbook(workbook, [_row("Patient 1", 111, "1-3")])
+    _write_workbook(workbook, [_row("Patient 1", 111, "0-2")])
     selection = _inventory(source, workbook, tmp_path / "review")
     _select(selection, "Patient 1", key.series_uid)
     output = tmp_path / "curated"
@@ -337,7 +337,7 @@ def test_subset_filter_accepts_patient_and_folder_aliases(tmp_path: Path) -> Non
     workbook = tmp_path / "workbook.xlsx"
     _write_workbook(
         workbook,
-        [_row("Patient 1", 111, "1-2"), _row("Patient 2", 222, "1-2")],
+        [_row("Patient 1", 111, "0-1"), _row("Patient 2", 222, "0-1")],
     )
     selection = _inventory(source, workbook, tmp_path / "review", patients={"PATIENT222"})
     _select(selection, "Patient 2", two.series_uid)
@@ -353,7 +353,7 @@ def test_inspect_dataset_consumes_curated_one_series_directory(tmp_path: Path) -
     source = tmp_path / "dicom"
     key = _write_series(source, "PATIENT111", 4, gap_after=2)
     workbook = tmp_path / "workbook.xlsx"
-    _write_workbook(workbook, [_row("Patient 1", 111, "1-4")])
+    _write_workbook(workbook, [_row("Patient 1", 111, "0-3")])
     selection = _inventory(source, workbook, tmp_path / "review")
     _select(selection, "Patient 1", key.series_uid)
     curated = tmp_path / "curated"
@@ -369,7 +369,7 @@ def test_inventory_and_preprocess_cli_end_to_end(tmp_path: Path) -> None:
     source = tmp_path / "dicom"
     key = _write_series(source, "PATIENT111", 3)
     workbook = tmp_path / "workbook.xlsx"
-    _write_workbook(workbook, [_row("Patient 1", 111, "1-2")])
+    _write_workbook(workbook, [_row("Patient 1", 111, "0-1")])
     review = tmp_path / "review"
     runner = CliRunner()
     inventory_result = runner.invoke(

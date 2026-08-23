@@ -36,7 +36,7 @@ This CPU-only command scans the source recursively and writes
 `outputs/ct_series_review/previews/`. A DICOM Study groups an imaging encounter; a Series identifies
 one acquisition within that Study. Review the Study/Series descriptions, `status`, concrete
 `reason`, geometry warnings, and preview for every candidate.
-`ready` means the classic single-frame CT series can map the workbook's one-based inclusive
+`ready` means the classic single-frame CT series can map the workbook's zero-based inclusive
 `Görüntü alanı` ordinals after ascending `InstanceNumber`. `not_selectable` candidates remain
 visible for audit, including unsupported dose-report objects. `no_series` identifies a missing
 folder or a folder without usable CT DICOM.

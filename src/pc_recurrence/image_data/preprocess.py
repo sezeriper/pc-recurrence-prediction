@@ -96,7 +96,7 @@ class CurationReport:
             "policy": {
                 "series_selection": "exact StudyInstanceUID and SeriesInstanceUID",
                 "duplicate_policy": "byte-identical SOPInstanceUID copies collapse to one file",
-                "indexing": "one-based inclusive ordinals after ascending DICOM InstanceNumber",
+                "indexing": "zero-based inclusive ordinals after ascending DICOM InstanceNumber",
                 "copy_policy": "staged complete-set replacement with SHA-256 verification",
                 "idempotent": True,
                 "source_preserved": True,

@@ -228,14 +228,14 @@ def _resolve_series(patient_dir: Path, selection: SeriesKey | None) -> DicomSeri
 
 
 def parse_image_range(value: str) -> tuple[int, int]:
-    """Parse a one-based inclusive workbook slice range."""
+    """Parse a zero-based inclusive workbook slice range."""
     match = re.fullmatch(r"\s*(\d+)\s*-\s*(\d+)\s*", value)
     if match is None:
         raise DicomGeometryError(f"invalid image range {value!r}; expected START-STOP")
     start, stop = (int(part) for part in match.groups())
-    if start < 1 or stop < start:
+    if stop < start:
         raise DicomGeometryError(
-            f"invalid image range {value!r}; indices are one-based and inclusive"
+            f"invalid image range {value!r}; indices are zero-based and inclusive"
         )
     return start, stop
 
@@ -260,11 +260,11 @@ def select_instance_range(
         if len(numbers) != len(set(numbers)):
             raise DicomGeometryError("duplicate InstanceNumber values prevent range mapping")
         numbered.sort(key=lambda item: item[0])
-        if stop > len(numbered):
+        if stop >= len(numbered):
             raise DicomGeometryError(
                 f"image range {image_range_raw!r} exceeds {len(numbered)} series slices"
             )
-        selected = [(path, dataset) for _, path, dataset in numbered[start - 1 : stop]]
+        selected = [(path, dataset) for _, path, dataset in numbered[start : stop + 1]]
     if len(selected) < 2:
         raise DicomGeometryError("selected image range must contain at least two CT slices")
     try:
@@ -286,7 +286,7 @@ def select_series_files(
     selection: SeriesKey,
     image_range_raw: str | None = None,
 ) -> tuple[list[Path], tuple[int, ...], tuple[str, ...]]:
-    """Resolve an exact Series and apply one-based inclusive InstanceNumber ordinals."""
+    """Resolve an exact Series and apply zero-based inclusive InstanceNumber ordinals."""
     series = _resolve_series(patient_dir, selection)
     selected, instance_numbers, sop_uids = select_instance_range(series.headers, image_range_raw)
     return [path for path, _ in selected], instance_numbers, sop_uids

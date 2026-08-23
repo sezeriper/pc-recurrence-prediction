@@ -149,8 +149,8 @@ def test_range_selection_is_exact_and_uses_instance_ordinals(tmp_path: Path) -> 
             instance_number=instance,
         )
 
-    assert parse_image_range(" 1 - 2 ") == (1, 2)
-    files, instance_numbers, sop_uids = select_series_files(patient, _key(selected_uid), "1-2")
+    assert parse_image_range(" 0 - 1 ") == (0, 1)
+    files, instance_numbers, sop_uids = select_series_files(patient, _key(selected_uid), "0-1")
     assert [path.name for path in files] == ["chosen-1.dcm", "chosen-2.dcm"]
     assert instance_numbers == (1, 2)
     assert len(sop_uids) == 2
@@ -173,7 +173,7 @@ def test_invalid_and_missing_exact_selection_fail(tmp_path: Path) -> None:
             instance_number=instance,
         )
     with pytest.raises(DicomGeometryError, match="exceeds 3 series slices"):
-        select_series_files(patient, _key(uid), "2-5")
+        select_series_files(patient, _key(uid), "1-3")
     with pytest.raises(DicomGeometryError, match="not found"):
         select_series_files(patient, _key(generate_uid()), "1-2")
 
