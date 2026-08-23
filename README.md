@@ -53,6 +53,8 @@ a series automatically. Partial progress and explicit clears are allowed; use `-
 for another inventory, `--port` for a different loopback port, or `--no-open-browser` to print the
 URL without launching a browser.
 
+![CT Series review web UI with patient status, selection controls, and axial montage previews](docs/review-ui.webp)
+
 Choose exactly one `ready` row per patient in the reviewer, or set `selected=yes` directly in the
 CSV and leave every other `selected` cell blank. Then curate:
 
@@ -132,6 +134,37 @@ SPECTRE patient-embedding runs. The workbook `nüks` value `yok` (trimmed and ca
 the negative class; every other populated value is positive. Training joins patients by workbook
 patient ID, verifies that both encoders used the same selected CT series provenance, and uses one
 shared holdout split without combining the encoder features.
+
+```mermaid
+flowchart TB
+    subgraph merlin["Merlin recurrence head — trained independently"]
+        direction LR
+        M0["Pooled Merlin embedding<br/>float32 [2048]"]
+        M1["Feature standardization<br/>(x - mean) / scale<br/>mean [2048], scale [2048]"]
+        M2["Affine layer<br/>Linear(2048 → 1)<br/>weight [1, 2048], bias [1]"]
+        M3["Logit<br/>scalar"]
+        M4["Sigmoid<br/>probability scalar"]
+        M5["Threshold<br/>p ≥ configured threshold<br/>default 0.5"]
+        M0 --> M1 --> M2 --> M3 --> M4 --> M5
+    end
+
+    subgraph spectre["SPECTRE recurrence head — trained independently"]
+        direction LR
+        S0["Pooled SPECTRE embedding<br/>float32 [1080]"]
+        S1["Feature standardization<br/>(x - mean) / scale<br/>mean [1080], scale [1080]"]
+        S2["Affine layer<br/>Linear(1080 → 1)<br/>weight [1, 1080], bias [1]"]
+        S3["Logit<br/>scalar"]
+        S4["Sigmoid<br/>probability scalar"]
+        S5["Threshold<br/>p ≥ configured threshold<br/>default 0.5"]
+        S0 --> S1 --> S2 --> S3 --> S4 --> S5
+    end
+```
+
+Each head has one learned affine layer and no hidden layers. Training computes feature-wise
+standardization statistics on the fit cohort, then optimizes class-weighted binary cross-entropy
+plus an L2 weight penalty with LBFGS. The persisted model stores the mean, scale, weight, bias, and
+decision threshold. Merlin and SPECTRE produce separate predictions; their features and logits are
+never fused.
 
 ```shell
 uv run pc-recurrence-classify train \
