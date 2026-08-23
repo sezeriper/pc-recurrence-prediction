@@ -3,43 +3,50 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import nibabel as nib
 import numpy as np
 import pytest
 
+from pc_recurrence.image_data.dicom import DicomVolume
 from pc_recurrence.image_embedding import pipeline
-from pc_recurrence.image_embedding.constants import CenteringMode, ImageEncoderName
+from pc_recurrence.image_embedding.constants import ImageEncoderName
 from pc_recurrence.image_embedding.foundation_models import FoundationModelArtifacts, RuntimeInfo
 
 
-@pytest.mark.parametrize(
-    ("encoder_name", "dimension"),
-    [
-        (ImageEncoderName.SPECTRE, 1080),
-        (ImageEncoderName.MERLIN, 2048),
-    ],
-)
-def test_foundation_encoders_write_finite_dynamic_embeddings(
+def _selected_ct_source(
+    tmp_path: Path, monkeypatch
+) -> tuple[Path, Path, pipeline.CtSeriesCase]:
+    dicom_root = tmp_path / "dicom_selected"
+    patient_dir = dicom_root / "PATIENT4"
+    patient_dir.mkdir(parents=True)
+    (dicom_root / "curation_manifest.json").write_text("{}", encoding="utf-8")
+    workbook = tmp_path / "patients.xlsx"
+    workbook.touch()
+    case = pipeline.CtSeriesCase("Patient 4", patient_dir, "study", "series")
+    volume = DicomVolume(
+        patient_id="Patient 4",
+        study_uid="study",
+        series_uid="series",
+        volume_hu=np.full((28, 30, 20), -500.0, dtype=np.float32),
+        affine_ras=np.diag([2.0, 2.0, 2.5, 1.0]),
+        spacing_mm=(2.0, 2.0, 2.5),
+        files=[],
+        median_slice_spacing_mm=2.5,
+        maximum_slice_gap_mm=2.5,
+        selected_instance_numbers=tuple(range(20)),
+        selected_sop_instance_uids=tuple(f"sop-{index}" for index in range(20)),
+    )
+    monkeypatch.setattr(pipeline, "discover_ct_series_cases", lambda *_args: [case])
+    monkeypatch.setattr(pipeline, "load_dicom_volume", lambda *_args, **_kwargs: volume)
+    monkeypatch.setattr(pipeline, "series_sha256", lambda _files: "C" * 64)
+    return dicom_root, workbook, case
+
+
+def _mock_runtime(
     tmp_path: Path,
     monkeypatch,
     encoder_name: ImageEncoderName,
     dimension: int,
 ) -> None:
-    roi_run = tmp_path / "roi_run"
-    patient_dir = roi_run / "Patient 4"
-    patient_dir.mkdir(parents=True)
-    (roi_run / "run_manifest.json").write_text(
-        json.dumps({"roi_target": "pancreas"}), encoding="utf-8"
-    )
-    affine = np.diag([2.0, 2.0, 2.5, 1.0])
-    ct = np.full((20, 22, 18), -1000.0, dtype=np.float32)
-    mask = np.zeros_like(ct, dtype=np.uint8)
-    mask[7:12, 3:9, 5:11] = 1
-    nib.save(nib.Nifti1Image(ct, affine), patient_dir / "roi_ct.nii.gz")
-    nib.save(
-        nib.Nifti1Image(mask, affine),
-        patient_dir / "roi_pancreas_mask.nii.gz",
-    )
     model_file = tmp_path / f"{encoder_name.value}.pt"
     model_file.touch()
     artifact_count = 2 if encoder_name is ImageEncoderName.SPECTRE else 1
@@ -73,10 +80,28 @@ def test_foundation_encoders_write_finite_dynamic_embeddings(
         lambda _model, _data: np.ones(2048, dtype=np.float32),
     )
 
+
+@pytest.mark.parametrize(
+    ("encoder_name", "dimension"),
+    [
+        (ImageEncoderName.SPECTRE, 1080),
+        (ImageEncoderName.MERLIN, 2048),
+    ],
+)
+def test_foundation_encoders_use_selected_ct_center(
+    tmp_path: Path,
+    monkeypatch,
+    encoder_name: ImageEncoderName,
+    dimension: int,
+) -> None:
+    dicom_root, workbook, _ = _selected_ct_source(tmp_path, monkeypatch)
+    _mock_runtime(tmp_path, monkeypatch, encoder_name, dimension)
+
     output = pipeline.run_embedding(
-        roi_run,
+        dicom_root,
         tmp_path / "outputs",
         tmp_path / "models",
+        workbook_path=workbook,
         encoder_name=encoder_name,
         run_dir=tmp_path / f"{encoder_name.value}_run",
     )
@@ -86,34 +111,20 @@ def test_foundation_encoders_write_finite_dynamic_embeddings(
         assert artifact["embeddings"].shape == (1, dimension)
         assert np.isfinite(artifact["embeddings"]).all()
     manifest = json.loads((output / "run_manifest.json").read_text(encoding="utf-8"))
-    assert manifest["encoder"] == encoder_name.value
-    assert manifest["feature_extraction"]["embedding_dimension"] == dimension
+    assert manifest["stage"] == f"{encoder_name.value}_selected_ct_embedding"
+    assert manifest["source_kind"] == "workbook-selected CT series range"
+    assert manifest["preprocessing"]["centering"] == "CT volume center"
+    record = manifest["patients"][0]
+    assert record["ct_series_sha256"] == "C" * 64
+    np.testing.assert_allclose(
+        record["preprocessing"]["crop_center_voxel"],
+        record["preprocessing"]["volume_center_voxel"],
+    )
 
 
-def test_volume_centering_invalidates_cache_and_records_mode(tmp_path: Path, monkeypatch) -> None:
-    roi_run = tmp_path / "roi_run"
-    patient_dir = roi_run / "Patient 4"
-    patient_dir.mkdir(parents=True)
-    (roi_run / "run_manifest.json").write_text(
-        json.dumps({"roi_target": "pancreas"}), encoding="utf-8"
-    )
-    affine = np.diag([2.0, 2.0, 2.5, 1.0])
-    ct = np.full((28, 30, 20), -1000.0, dtype=np.float32)
-    mask = np.zeros_like(ct, dtype=np.uint8)
-    mask[2:6, 22:27, 3:7] = 1
-    nib.save(nib.Nifti1Image(ct, affine), patient_dir / "roi_ct.nii.gz")
-    nib.save(
-        nib.Nifti1Image(mask, affine),
-        patient_dir / "roi_pancreas_mask.nii.gz",
-    )
-    model_file = tmp_path / "spectre.pt"
-    model_file.touch()
-    artifacts = FoundationModelArtifacts(
-        paths=(model_file, model_file), hashes=("A" * 64, "B" * 64)
-    )
-    runtime = RuntimeInfo("test", "test", "cpu", "test", 1, 1, 0.1, (2, 1080))
-    monkeypatch.setattr(pipeline, "acquire_foundation_model", lambda *_args, **_kwargs: artifacts)
-    monkeypatch.setattr(pipeline, "load_foundation_runtime", lambda *_args: (object(), runtime))
+def test_selected_ct_cache_reuses_matching_series(tmp_path: Path, monkeypatch) -> None:
+    dicom_root, workbook, _ = _selected_ct_source(tmp_path, monkeypatch)
+    _mock_runtime(tmp_path, monkeypatch, ImageEncoderName.SPECTRE, 1080)
     encode_calls: list[str] = []
 
     def _fake_encode_spectre(model, data, *, expected_grid):
@@ -124,72 +135,17 @@ def test_volume_centering_invalidates_cache_and_records_mode(tmp_path: Path, mon
         )
 
     monkeypatch.setattr(pipeline, "encode_spectre", _fake_encode_spectre)
-
     run_dir = tmp_path / "embedding_run"
-    first = pipeline.run_embedding(
-        roi_run,
-        tmp_path / "outputs",
-        tmp_path / "models",
-        encoder_name=ImageEncoderName.SPECTRE,
-        run_dir=run_dir,
-        centering=CenteringMode.PANCREAS,
-    )
-    first_manifest = json.loads((first / "run_manifest.json").read_text(encoding="utf-8"))
-    assert first_manifest["preprocessing"]["centering"] == "predicted pancreas bounding-box center"
+    for _ in range(2):
+        pipeline.run_embedding(
+            dicom_root,
+            tmp_path / "outputs",
+            tmp_path / "models",
+            workbook_path=workbook,
+            encoder_name=ImageEncoderName.SPECTRE,
+            run_dir=run_dir,
+        )
 
-    second = pipeline.run_embedding(
-        roi_run,
-        tmp_path / "outputs",
-        tmp_path / "models",
-        encoder_name=ImageEncoderName.SPECTRE,
-        run_dir=run_dir,
-        centering=CenteringMode.VOLUME,
-    )
-
-    assert len(encode_calls) == 2  # volume run recomputed despite cached pancreas state
-    second_manifest = json.loads((second / "run_manifest.json").read_text(encoding="utf-8"))
-    assert second_manifest["preprocessing"]["centering"] == "CT volume center"
-    state = json.loads(next((second / ".state").glob("*.json")).read_text(encoding="utf-8"))
-    assert state["centering"] == "volume"
-    assert state["record"]["preprocessing"]["centering"] == "volume"
-    np.testing.assert_allclose(
-        state["record"]["preprocessing"]["crop_center_voxel"],
-        state["record"]["preprocessing"]["volume_center_voxel"],
-    )
-
-
-def test_foundation_encoder_strictly_skips_missing_pancreas_mask(
-    tmp_path: Path, monkeypatch
-) -> None:
-    roi_run = tmp_path / "roi_run"
-    patient_dir = roi_run / "Patient 4"
-    patient_dir.mkdir(parents=True)
-    (roi_run / "run_manifest.json").write_text(
-        json.dumps({"roi_target": "pancreas"}), encoding="utf-8"
-    )
-    nib.save(
-        nib.Nifti1Image(np.zeros((8, 8, 8), dtype=np.float32), np.eye(4)),
-        patient_dir / "roi_ct.nii.gz",
-    )
-    model_file = tmp_path / "spectre.pt"
-    model_file.touch()
-    artifacts = FoundationModelArtifacts(
-        paths=(model_file, model_file), hashes=("A" * 64, "B" * 64)
-    )
-    runtime = RuntimeInfo("test", "test", "cpu", "test", 1, 1, 0.1, (2, 1080))
-    monkeypatch.setattr(pipeline, "acquire_foundation_model", lambda *_args, **_kwargs: artifacts)
-    monkeypatch.setattr(pipeline, "load_foundation_runtime", lambda *_args: (object(), runtime))
-
-    output = pipeline.run_embedding(
-        roi_run,
-        tmp_path / "outputs",
-        tmp_path / "models",
-        encoder_name=ImageEncoderName.SPECTRE,
-        run_dir=tmp_path / "spectre_run",
-    )
-
-    with np.load(output / "image_embeddings.npz", allow_pickle=False) as artifact:
-        assert artifact["embeddings"].shape == (0, 1080)
-    manifest = json.loads((output / "run_manifest.json").read_text(encoding="utf-8"))
-    assert len(manifest["failures"]) == 1
-    assert "roi_pancreas_mask" in manifest["failures"][0]["reason"]
+    assert encode_calls == ["encoded"]
+    state = json.loads(next((run_dir / ".state").glob("*.json")).read_text(encoding="utf-8"))
+    assert state["ct_series_sha256"] == "C" * 64

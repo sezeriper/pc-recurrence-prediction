@@ -34,6 +34,7 @@ class ImageWorkbookRow:
     hasta_no: str | float | None
     dicom_folder: str | None
     image_range_raw: str | None
+    recurrence_raw: Any
 
 
 def _clean_scalar(value: Any) -> Any:
@@ -96,6 +97,7 @@ def load_image_workbook(
                     hasta_no=hasta_no,
                     dicom_folder=_dicom_folder(hasta_no),
                     image_range_raw=_clean_scalar(raw_row[15]),
+                    recurrence_raw=_clean_scalar(raw_row[4]),
                 )
             )
     finally:

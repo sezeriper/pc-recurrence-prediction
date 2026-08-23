@@ -11,9 +11,8 @@ from pathlib import Path
 from typing import Any
 
 from pc_recurrence import __version__
-from pc_recurrence.io import sha256_file
+from pc_recurrence.io import sha256_file, write_json
 
-from .artifacts import render_dicom_series_preview, write_json
 from .dicom import (
     CT_IMAGE_STORAGE_UID,
     DicomGeometryError,
@@ -23,6 +22,7 @@ from .dicom import (
     select_instance_range,
     series_geometry,
 )
+from .preview import render_dicom_series_preview
 from .workbook import ImageWorkbookRow, load_image_workbook, select_image_workbook_rows
 
 SCAN_SELECTION_COLUMNS = (
@@ -569,7 +569,9 @@ def load_scan_selections(
                 patient_csv[0][field] != str(patient_live[0][field]) for field in stale_fields
             )
         if stale:
-            errors.append(f"scan selection is stale for {patient_id}; rerun pc-image-roi inventory")
+            errors.append(
+                f"scan selection is stale for {patient_id}; rerun pc-image-data inventory"
+            )
             continue
 
         identifier = document.selected_candidate_ids.get(patient_id)

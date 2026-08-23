@@ -5,11 +5,11 @@ from typing import Annotated
 
 import typer
 
-from .artifacts import create_run_directory
+from pc_recurrence.io import create_run_directory
+
 from .constants import (
     DEFAULT_DICOM_ROOT,
-    DEFAULT_MODEL_CACHE,
-    DEFAULT_OUTPUT_ROOT,
+    DEFAULT_INSPECTION_OUTPUT_ROOT,
     DEFAULT_SCAN_REVIEW_ROOT,
     DEFAULT_SCAN_SELECTION,
     DEFAULT_SOURCE_DICOM_ROOT,
@@ -18,7 +18,7 @@ from .constants import (
 
 app = typer.Typer(
     no_args_is_help=True,
-    help="Segment the pancreas/tumor and create review ROIs.",
+    help="Inventory, review, and curate CT series for downstream image tasks.",
 )
 
 
@@ -32,14 +32,14 @@ def _selected_patients(value: str | None) -> set[str] | None:
 def inspect(
     dicom_root: Annotated[Path, typer.Option(exists=True, file_okay=False)] = DEFAULT_DICOM_ROOT,
     workbook: Annotated[Path, typer.Option(exists=True, dir_okay=False)] = DEFAULT_WORKBOOK,
-    output_root: Annotated[Path, typer.Option()] = DEFAULT_OUTPUT_ROOT,
+    output_root: Annotated[Path, typer.Option()] = DEFAULT_INSPECTION_OUTPUT_ROOT,
     run_dir: Annotated[Path | None, typer.Option()] = None,
     patients: Annotated[
-        str | None, typer.Option(help="Comma-separated patient folder names.")
+        str | None, typer.Option(help="Comma-separated workbook patient IDs or DICOM folders.")
     ] = None,
 ) -> None:
-    """Audit CT series geometry without running the segmentation model."""
-    from .pipeline import inspect_dataset, write_inspection_run
+    """Audit curated CT series geometry."""
+    from .inspection import inspect_dataset, write_inspection_run
 
     destination = run_dir or create_run_directory(output_root)
     destination.mkdir(parents=True, exist_ok=True)
@@ -101,11 +101,7 @@ def review(
     ] = DEFAULT_SCAN_SELECTION,
     port: Annotated[
         int,
-        typer.Option(
-            min=1,
-            max=65535,
-            help="Loopback HTTP port for the local montage reviewer.",
-        ),
+        typer.Option(min=1, max=65535, help="Loopback HTTP port for the local montage reviewer."),
     ] = 8765,
     open_browser: Annotated[
         bool,
@@ -119,11 +115,7 @@ def review(
     from .review_ui import serve_scan_review
 
     try:
-        serve_scan_review(
-            selection.resolve(),
-            port=port,
-            open_browser=open_browser,
-        )
+        serve_scan_review(selection.resolve(), port=port, open_browser=open_browser)
     except (OSError, RuntimeError, ValueError) as error:
         typer.echo(str(error), err=True)
         raise typer.Exit(code=1) from error
@@ -149,7 +141,7 @@ def preprocess(
     ] = None,
     force: Annotated[bool, typer.Option("--force")] = False,
 ) -> None:
-    """Curate exact operator-selected CT Series ranges for all downstream tasks."""
+    """Curate exact operator-selected CT Series ranges for downstream tasks."""
     from .preprocess import curate_dataset, write_curation_report
 
     try:
@@ -171,88 +163,6 @@ def preprocess(
     if report.failures:
         raise typer.Exit(code=1)
     typer.echo(str(output_dir.resolve()))
-
-
-def _run(
-    dicom_root: Path,
-    workbook: Path,
-    output_root: Path,
-    model_cache: Path,
-    run_dir: Path | None,
-    patients: str | None,
-    resume: bool,
-    force: bool,
-    *,
-    local_model_only: bool,
-) -> None:
-    from .pipeline import run_segmentation
-
-    destination = run_segmentation(
-        dicom_root=dicom_root,
-        workbook_path=workbook,
-        output_root=output_root,
-        model_cache=model_cache,
-        run_dir=run_dir,
-        patients=_selected_patients(patients),
-        resume=resume,
-        force=force,
-        local_model_only=local_model_only,
-    )
-    typer.echo(str(destination.resolve()))
-
-
-@app.command()
-def segment(
-    dicom_root: Annotated[Path, typer.Option(exists=True, file_okay=False)] = DEFAULT_DICOM_ROOT,
-    workbook: Annotated[Path, typer.Option(exists=True, dir_okay=False)] = DEFAULT_WORKBOOK,
-    output_root: Annotated[Path, typer.Option()] = DEFAULT_OUTPUT_ROOT,
-    model_cache: Annotated[Path, typer.Option()] = DEFAULT_MODEL_CACHE,
-    run_dir: Annotated[Path | None, typer.Option()] = None,
-    patients: Annotated[
-        str | None, typer.Option(help="Comma-separated patient folder names.")
-    ] = None,
-    resume: Annotated[bool, typer.Option("--resume/--no-resume")] = True,
-    force: Annotated[bool, typer.Option("--force")] = False,
-) -> None:
-    """Run from an already cached and checksum-verified model."""
-    _run(
-        dicom_root,
-        workbook,
-        output_root,
-        model_cache,
-        run_dir,
-        patients,
-        resume,
-        force,
-        local_model_only=True,
-    )
-
-
-@app.command(name="run")
-def run_pipeline(
-    dicom_root: Annotated[Path, typer.Option(exists=True, file_okay=False)] = DEFAULT_DICOM_ROOT,
-    workbook: Annotated[Path, typer.Option(exists=True, dir_okay=False)] = DEFAULT_WORKBOOK,
-    output_root: Annotated[Path, typer.Option()] = DEFAULT_OUTPUT_ROOT,
-    model_cache: Annotated[Path, typer.Option()] = DEFAULT_MODEL_CACHE,
-    run_dir: Annotated[Path | None, typer.Option()] = None,
-    patients: Annotated[
-        str | None, typer.Option(help="Comma-separated patient folder names.")
-    ] = None,
-    resume: Annotated[bool, typer.Option("--resume/--no-resume")] = True,
-    force: Annotated[bool, typer.Option("--force")] = False,
-) -> None:
-    """Acquire the pinned model, segment CT scans, and create review artifacts."""
-    _run(
-        dicom_root,
-        workbook,
-        output_root,
-        model_cache,
-        run_dir,
-        patients,
-        resume,
-        force,
-        local_model_only=False,
-    )
 
 
 if __name__ == "__main__":

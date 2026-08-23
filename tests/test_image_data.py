@@ -12,23 +12,22 @@ from pydicom.uid import SecondaryCaptureImageStorage, generate_uid
 from test_image_dicom import DEFAULT_STUDY_UID, _write_slice
 from typer.testing import CliRunner
 
-from pc_recurrence.image_roi import cli as image_cli
-from pc_recurrence.image_roi.cli import app
-from pc_recurrence.image_roi.constants import (
+from pc_recurrence.image_data import cli as image_cli
+from pc_recurrence.image_data.cli import app
+from pc_recurrence.image_data.constants import (
     DEFAULT_DICOM_ROOT,
-    DEFAULT_MODEL_CACHE,
-    DEFAULT_OUTPUT_ROOT,
+    DEFAULT_INSPECTION_OUTPUT_ROOT,
     DEFAULT_SCAN_REVIEW_ROOT,
     DEFAULT_SCAN_SELECTION,
 )
-from pc_recurrence.image_roi.dicom import SeriesKey
-from pc_recurrence.image_roi.pipeline import inspect_dataset
-from pc_recurrence.image_roi.preprocess import curate_dataset, write_curation_report
-from pc_recurrence.image_roi.scan_selection import (
+from pc_recurrence.image_data.dicom import SeriesKey
+from pc_recurrence.image_data.inspection import inspect_dataset
+from pc_recurrence.image_data.preprocess import curate_dataset, write_curation_report
+from pc_recurrence.image_data.scan_selection import (
     SCAN_SELECTION_COLUMNS,
     write_scan_inventory,
 )
-from pc_recurrence.image_roi.workbook import EXPECTED_HEADERS
+from pc_recurrence.image_data.workbook import EXPECTED_HEADERS
 
 
 def test_writable_defaults_are_outside_dataset() -> None:
@@ -40,8 +39,7 @@ def test_writable_defaults_are_outside_dataset() -> None:
         DEFAULT_SCAN_REVIEW_ROOT,
         DEFAULT_SCAN_SELECTION,
         DEFAULT_DICOM_ROOT,
-        DEFAULT_OUTPUT_ROOT,
-        DEFAULT_MODEL_CACHE,
+        DEFAULT_INSPECTION_OUTPUT_ROOT,
     )
     assert all(not path.resolve().is_relative_to(dataset_root) for path in writable_defaults)
 
@@ -58,12 +56,6 @@ def test_cli_writable_defaults_resolve_outside_dataset() -> None:
         .parameters["output_dir"]
         .default,
         "inspection output": python_inspect.signature(image_cli.inspect)
-        .parameters["output_root"]
-        .default,
-        "segmentation output": python_inspect.signature(image_cli.segment)
-        .parameters["output_root"]
-        .default,
-        "pipeline output": python_inspect.signature(image_cli.run_pipeline)
         .parameters["output_root"]
         .default,
     }

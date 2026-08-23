@@ -1,2 +1,2 @@
-"""SPECTRE and Merlin image embedding extraction from generated 3D CT ROIs."""
+"""SPECTRE and Merlin embedding extraction from curated CT series."""
 

@@ -1,10 +1,10 @@
 # Pancreatic Cancer Image Preprocessing
 
 This repository implements the image modality of the pancreatic adenocarcinoma recurrence
-project: workbook-driven DICOM curation, MONAI pancreas ROI detection, and frozen SPECTRE-Large /
-Merlin image embeddings. It reads each approved Turkish spreadsheet row's `Görüntü alanı` slice
-range, copies the selected slices into a curated folder, segments the pancreas, and encodes the
-pancreas-centered ROIs.
+project: workbook-driven DICOM curation, frozen SPECTRE-Large and Merlin image embeddings, and
+independent recurrence classifiers. It reads each approved Turkish spreadsheet row's
+`Görüntü alanı` slice range, copies the selected slices into a curated folder, and encodes a crop
+centered on the complete selected CT range.
 
 The included labels and splits are deliberately provisional pipeline-smoke inputs, not a
 scientific recurrence model or evaluation.
@@ -20,39 +20,36 @@ uv sync --extra imaging --group dev
 Run commands through `uv run`; no separate interpreter or hardware-specific constraints file is
 required. PyTorch uses the first available CUDA device, then Apple MPS, and otherwise CPU.
 
-## CT segmentation and ROI review
+## CT series curation
 
-The image pipeline uses the pinned MONAI `pancreas_ct_dints_segmentation` TorchScript bundle.
+Source DICOM and the workbook are read from `dataset/`, which remains read-only. Generated review
+and curated DICOM artifacts default to `outputs/`; no default command writes inside `dataset/`.
 
-Source DICOM and the workbook are read from `dataset/`, which remains read-only. Generated review,
-curated DICOM, model, and run artifacts default to `outputs/` or `.cache/`; no default command
-writes inside `dataset/`.
-
-Create an operator review inventory before curating any slices:
+Create an operator review inventory:
 
 ```shell
-uv run pc-image-roi inventory
+uv run pc-image-data inventory
 ```
 
-This CPU-only command scans the untouched cleaned source recursively and writes
+This CPU-only command scans the source recursively and writes
 `outputs/ct_series_review/scan_selection.csv` plus axial montages under
 `outputs/ct_series_review/previews/`. A DICOM Study groups an imaging encounter; a Series identifies
 one acquisition within that Study. Review the Study/Series descriptions, `status`, concrete
 `reason`, geometry warnings, and preview for every candidate.
-`ready` means the classic single-frame CT Series can map the
-workbook's one-based inclusive `Görüntü alanı` ordinals after ascending `InstanceNumber`.
-`not_selectable` candidates remain visible for audit, including unsupported dose-report objects.
-`no_series` identifies a missing folder or a folder without usable CT DICOM.
+`ready` means the classic single-frame CT series can map the workbook's one-based inclusive
+`Görüntü alanı` ordinals after ascending `InstanceNumber`. `not_selectable` candidates remain
+visible for audit, including unsupported dose-report objects. `no_series` identifies a missing
+folder or a folder without usable CT DICOM.
 
-Open the loopback-only montage reviewer for that existing inventory:
+Open the loopback-only montage reviewer:
 
 ```shell
-uv run pc-image-roi review
+uv run pc-image-data review
 ```
 
-The reviewer keeps every patient and Series in inventory order, shows the original montage at full
+The reviewer keeps every patient and series in inventory order, shows the original montage at full
 resolution, and changes only `selected` cells when **Save selections** is pressed. It never chooses
-a Series automatically. Partial progress and explicit clears are allowed; use `--selection FILE`
+a series automatically. Partial progress and explicit clears are allowed; use `--selection FILE`
 for another inventory, `--port` for a different loopback port, or `--no-open-browser` to print the
 URL without launching a browser.
 
@@ -60,95 +57,97 @@ Choose exactly one `ready` row per patient in the reviewer, or set `selected=yes
 CSV and leave every other `selected` cell blank. Then curate:
 
 ```shell
-uv run pc-image-roi preprocess
+uv run pc-image-data preprocess
 ```
 
 Preprocessing validates the complete CSV against the live source before touching the curated
-output under `outputs/dicom_selected`.
-An added/removed Series, changed SOP membership, changed file counts, or changed workbook range
-makes the selection stale and requires rerunning `inventory`. The chosen Study+Series is
-deduplicated by SOP Instance UID only when duplicate files are byte-identical, the workbook range
-is applied within that Series, and the exact resulting file set replaces any older curated range
-atomically. Existing `scan_selection.csv` review work is protected unless `inventory --force` is
-used; that flag deliberately resets selections and previews. Preprocessing `--force` stages and
-rebuilds the exact selected output.
+output under `outputs/dicom_selected`. An added or removed series, changed SOP membership, changed
+file counts, or changed workbook range makes the selection stale and requires rerunning
+`inventory`. The chosen Study and Series is deduplicated by SOP Instance UID only when duplicate
+files are byte-identical. The workbook range is applied within that series, and the exact resulting
+file set atomically replaces any older curated range. Existing review work is protected unless
+`inventory --force` is used; that flag deliberately resets selections and previews.
+`preprocess --force` stages and rebuilds the exact selected output.
 
 Both commands accept `--patients "Patient 1,PATIENT853534"` with workbook IDs or DICOM folder
 aliases. Inventory and preprocessing then require choices only for that explicit subset. Use the
 same subset for both commands.
 
-`inspect` and segmentation consume only the curated one-Series patient directories. They never
-choose a larger Series or repeat the operator's selection. Study UID, Series UID, selected SOP
-Instance UIDs, and geometry warnings remain in inspection, segmentation, state, and bounding-box
-artifacts.
+Audit the curated series geometry without modifying it:
 
 ```shell
-uv run pc-image-roi inspect
-uv run pc-image-roi segment \
-  --run-dir "outputs/image_roi/<existing-run>" --resume
-uv run pc-image-roi run
+uv run pc-image-data inspect
 ```
 
-Use `--patients "Patient 1,Patient 3"` (workbook IDs) or `--patients "PATIENT2321275"` (DICOM
-folder names) for a subset. `--force` replaces cached state within the selected run. Inference
-automatically uses the available CUDA, Apple MPS, or CPU runtime.
-
-Every run centers the ROI on the predicted pancreas; tumor-centered ROIs are not produced. Patients
-without a pancreas prediction produce no ROI artifacts.
-
 Preprocessing fails closed unless every targeted patient has one live `ready` choice. Geometry
-gaps and duplicate slice positions are warnings rather than selection blockers. The segmentation
-pipeline skips folders with zero or multiple processable CT Series instead of selecting one
-implicitly. Each detected case contains the full-volume pancreas mask, the pancreas-centered
-cropped CT and mask, physical bounding-box metadata, and an axial/coronal/sagittal review montage.
-All masks and ROIs are provisional research outputs and must not be used diagnostically.
+gaps and duplicate slice positions are warnings rather than selection blockers. Study UID, Series
+UID, selected SOP Instance UIDs, and geometry warnings remain in the curation and inspection
+manifests.
 
 ## Image embeddings
 
-The separate `pc-image-embed` pipeline consumes `roi_ct.nii.gz` artifacts from one completed image
-ROI run. Select a backend with `--encoder spectre|merlin`. Both encoders require a pancreas-ROI run
-(all ROI runs center on the pancreas) containing a non-empty `roi_pancreas_mask.nii.gz` for every
-encoded case.
-For example:
+The `pc-image-embed` pipeline consumes the curated DICOM folders produced by
+`pc-image-data preprocess`. It loads each workbook-selected CT series range directly. Select a
+backend with `--encoder spectre|merlin`:
 
 ```shell
-uv run pc-image-embed run \
-  --encoder spectre \
-  --roi-run "outputs/image_roi/<pancreas-roi-run>"
-
-uv run pc-image-embed run \
-  --encoder merlin \
-  --roi-run "outputs/image_roi/<pancreas-roi-run>"
+uv run pc-image-embed run --encoder spectre
+uv run pc-image-embed run --encoder merlin
 ```
 
-The command uses the same environment created by `uv sync`. Use `embed` instead of `run` to require
-an already cached checkpoint. `--patients`, `--run-dir`, `--resume`, `--force`, and `--centering`
-are supported.
+`--dicom-root` defaults to `outputs/dicom_selected`, and `--workbook` defaults to the source
+workbook. The command uses the same environment created by `uv sync`. Use `embed` instead of `run`
+to require an already cached checkpoint. `--patients`, `--run-dir`, `--resume`, and `--force` are
+supported.
 
-Both encoders center their crop on the CT volume's geometric center by default. Pass
-`--centering pancreas` to center the crop on the predicted pancreas bounding box instead; window
-sizes are unchanged. The chosen mode and the pancreas/volume center coordinates are recorded in
-every run manifest and per-patient record.
+Both encoders center their input on the geometric center of the complete selected CT range. The
+center voxel, selected Study/Series identifiers, SOP Instance UIDs, and a hash of the selected
+series are recorded per patient.
 
 The backends are pinned and save float32 embeddings without L2 normalization:
 
-- [SPECTRE-Large](https://github.com/cclaess/SPECTRE) preserves native spacing, centers a crop on
-  the predicted pancreas bounding box with a 15 mm margin, pads to 128 x 128 x 64 grid multiples,
-  and saves the 1,080-value scan CLS token. Its model weights are CC-BY-NC-SA and restricted to
-  non-commercial use.
+- [SPECTRE-Large](https://github.com/cclaess/SPECTRE) preserves native spacing, extracts the
+  centered 128 x 128 x 64 crop, and saves the 1,080-value scan CLS token. Its model weights are
+  CC-BY-NC-SA and restricted to non-commercial use.
 - [Merlin](https://github.com/StanfordMIMI/Merlin) reorients to RAS, resamples to
-  1.5 x 1.5 x 3 mm, clips `[-1000, 1000]` HU into `[0, 1]`, centers a 224 x 224 x 160 input on the
-  pancreas, loads only the I3ResNet image substate, and saves its 2,048-value pooled embedding.
+  1.5 x 1.5 x 3 mm, clips `[-1000, 1000]` HU into `[0, 1]`, extracts the centered
+  224 x 224 x 160 input, loads only the I3ResNet image substate, and saves its 2,048-value pooled
+  embedding.
 
-Package versions, Hugging Face revisions, and checkpoint SHA-256 values are recorded in every run
-manifest. The runtime also records the selected device type and name.
+Package versions, Hugging Face revisions, checkpoint SHA-256 values, and the source curation
+manifest hash are recorded in every run manifest. The runtime also records the selected device
+type and name.
 
 Each run writes:
 
 - `image_embeddings.npz`: aligned patient IDs, encoder name, and the fixed float32 matrix.
 - `patch_embeddings.npz`: patch/scan token vectors, locations, and valid-voxel counts.
-- `embedding_summary.csv`: one audit row per selected ROI.
+- `embedding_summary.csv`: one audit row per selected CT range.
 - `run_manifest.json`: input/model hashes, preprocessing, pooling, runtime, and failures.
+
+## Recurrence classification
+
+`pc-recurrence-classify` trains independent affine recurrence heads over completed Merlin and
+SPECTRE patient-embedding runs. The workbook `nüks` value `yok` (trimmed and case-insensitive) is
+the negative class; every other populated value is positive. Training joins patients by workbook
+patient ID, verifies that both encoders used the same selected CT series provenance, and uses one
+shared holdout split without combining the encoder features.
+
+```shell
+uv run pc-recurrence-classify train \
+  --merlin-run "outputs/image_embeddings/<merlin-run>" \
+  --spectre-run "outputs/image_embeddings/<spectre-run>"
+
+uv run pc-recurrence-classify predict \
+  --model-run "outputs/recurrence_classification/<training-run>" \
+  --merlin-run "outputs/image_embeddings/<merlin-run>" \
+  --spectre-run "outputs/image_embeddings/<spectre-run>"
+```
+
+Training writes holdout predictions and metrics, full-cohort classifications, checksum-authenticated
+safe NumPy model artifacts, and a run manifest. Prediction validates those hashes before writing
+results. Metrics whose denominator is absent are `null` with a reason; a one-class holdout is not
+evidence of recurrence discrimination. These outputs are provisional research artifacts.
 
 ## Verification
 
@@ -156,6 +155,3 @@ Each run writes:
 uv run ruff check .
 uv run pytest
 ```
-
-The real-model smoke test is opt-in because it requires cached model weights and substantial
-compute. Run it with `RUN_IMAGE_MODEL_TEST=1 uv run pytest tests/test_image_gpu.py`.

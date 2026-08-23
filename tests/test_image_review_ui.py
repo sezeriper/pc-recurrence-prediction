@@ -11,11 +11,11 @@ from typing import Any
 import pytest
 from typer.testing import CliRunner
 
-from pc_recurrence.image_roi import cli as image_cli
-from pc_recurrence.image_roi import review_ui
-from pc_recurrence.image_roi.review_ui import create_review_server
-from pc_recurrence.image_roi.review_ui_assets import APP_CSS, APP_JS, INDEX_HTML
-from pc_recurrence.image_roi.scan_selection import (
+from pc_recurrence.image_data import cli as image_cli
+from pc_recurrence.image_data import review_ui
+from pc_recurrence.image_data.review_ui import create_review_server
+from pc_recurrence.image_data.review_ui_assets import APP_CSS, APP_JS, INDEX_HTML
+from pc_recurrence.image_data.scan_selection import (
     SCAN_SELECTION_COLUMNS,
     ScanSelectionConflictError,
     read_scan_selection,

@@ -12,7 +12,14 @@ import nibabel as nib
 import numpy as np
 
 from pc_recurrence import __version__
-from pc_recurrence.image_roi.dicom import natural_patient_key
+from pc_recurrence.image_data.dicom import (
+    DicomVolume,
+    SeriesKey,
+    inspect_patient,
+    load_dicom_volume,
+    series_sha256,
+)
+from pc_recurrence.image_data.workbook import load_image_workbook, select_image_workbook_rows
 from pc_recurrence.io import sha256_file
 
 from .artifacts import (
@@ -36,7 +43,6 @@ from .constants import (
     SPECTRE_HU_RANGE,
     SPECTRE_REPOSITORY,
     SPECTRE_REVISION,
-    CenteringMode,
     ImageEncoderName,
 )
 from .foundation_models import (
@@ -50,12 +56,11 @@ from .foundation_preprocessing import prepare_merlin_input, prepare_spectre_inpu
 
 
 @dataclass(frozen=True)
-class RoiCase:
+class CtSeriesCase:
     patient_id: str
     patient_dir: Path
-    roi_ct_path: Path
-    roi_pancreas_mask_path: Path | None
-    roi_target: str | None
+    study_uid: str
+    series_uid: str
 
 
 @dataclass(frozen=True)
@@ -69,36 +74,44 @@ class CaseEncoding:
     record: dict[str, Any]
 
 
-def discover_roi_cases(roi_run: Path, patients: set[str] | None = None) -> list[RoiCase]:
-    if not roi_run.is_dir():
-        raise ValueError(f"ROI run directory does not exist: {roi_run}")
-    manifest_path = roi_run / "run_manifest.json"
-    if not manifest_path.is_file():
-        raise ValueError(f"ROI run has no run_manifest.json: {roi_run}")
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    roi_target = manifest.get("roi_target")
-    cases: list[RoiCase] = []
-    for path in roi_run.iterdir():
-        roi_ct = path / "roi_ct.nii.gz"
-        mask = path / "roi_pancreas_mask.nii.gz"
-        if path.is_dir() and roi_ct.is_file() and (patients is None or path.name in patients):
-            cases.append(
-                RoiCase(
-                    path.name,
-                    path,
-                    roi_ct,
-                    mask if mask.is_file() else None,
-                    roi_target,
-                )
+def discover_ct_series_cases(
+    dicom_root: Path,
+    workbook_path: Path,
+    patients: set[str] | None = None,
+) -> list[CtSeriesCase]:
+    if not dicom_root.is_dir():
+        raise ValueError(f"curated DICOM directory does not exist: {dicom_root}")
+    curation_manifest = dicom_root / "curation_manifest.json"
+    if not curation_manifest.is_file():
+        raise ValueError(f"curated DICOM directory has no curation_manifest.json: {dicom_root}")
+    rows = select_image_workbook_rows(load_image_workbook(workbook_path), patients)
+    cases: list[CtSeriesCase] = []
+    for row in rows:
+        if row.dicom_folder is None:
+            raise ValueError(f"Patient {row.patient_id!r} has no DICOM folder mapping")
+        patient_dir = dicom_root / row.dicom_folder
+        if not patient_dir.is_dir():
+            raise ValueError(f"Patient {row.patient_id!r} has no curated CT series directory")
+        inspection = inspect_patient(patient_dir, patient_id=row.patient_id)
+        if (
+            inspection.geometry_status != "eligible"
+            or inspection.study_uid is None
+            or inspection.series_uid is None
+        ):
+            raise ValueError(
+                f"Patient {row.patient_id!r} curated CT series is invalid: "
+                f"{inspection.reason or inspection.geometry_status}"
             )
-    cases.sort(key=lambda case: natural_patient_key(case.patient_id))
-    if patients is not None:
-        found = {case.patient_id for case in cases}
-        missing = sorted(patients - found, key=natural_patient_key)
-        if missing:
-            raise ValueError(f"requested patients have no ROI CT artifact: {', '.join(missing)}")
+        cases.append(
+            CtSeriesCase(
+                patient_id=row.patient_id,
+                patient_dir=patient_dir,
+                study_uid=inspection.study_uid,
+                series_uid=inspection.series_uid,
+            )
+        )
     if not cases:
-        raise ValueError("the selected ROI run contains no roi_ct.nii.gz artifacts")
+        raise ValueError("the selected workbook cohort contains no curated CT series")
     return cases
 
 
@@ -115,21 +128,17 @@ def _load_cached_case(
     state_json: Path,
     state_npz: Path,
     *,
-    roi_sha256: str,
-    mask_sha256: str | None,
+    ct_series_sha256: str,
     encoder_name: ImageEncoderName,
     model_fingerprint: str,
-    centering: CenteringMode,
 ) -> CaseEncoding | None:
     if not state_json.is_file() or not state_npz.is_file():
         return None
     metadata = json.loads(state_json.read_text(encoding="utf-8"))
     if (
-        metadata.get("roi_ct_sha256") != roi_sha256
-        or metadata.get("roi_pancreas_mask_sha256") != mask_sha256
+        metadata.get("ct_series_sha256") != ct_series_sha256
         or metadata.get("encoder") != encoder_name.value
         or metadata.get("model_fingerprint") != model_fingerprint
-        or metadata.get("centering") != centering.value
     ):
         return None
     with np.load(state_npz, allow_pickle=False) as cached:
@@ -146,20 +155,16 @@ def _load_cached_case(
 
 def _encode_foundation_case(
     encoder: Any,
-    case: RoiCase,
+    case: CtSeriesCase,
+    volume: DicomVolume,
+    ct_series_digest: str,
     encoder_name: ImageEncoderName,
-    centering: CenteringMode,
 ) -> CaseEncoding:
-    if case.roi_pancreas_mask_path is None:
-        raise ValueError("strict foundation encoding requires roi_pancreas_mask.nii.gz")
-    image = nib.load(case.roi_ct_path)
-    mask = nib.load(case.roi_pancreas_mask_path)
-    roi_sha256 = sha256_file(case.roi_ct_path)
-    mask_sha256 = sha256_file(case.roi_pancreas_mask_path)
+    image = nib.Nifti1Image(volume.volume_hu, volume.affine_ras)
     native_shape = tuple(int(value) for value in image.shape)
     started = time.perf_counter()
     if encoder_name is ImageEncoderName.SPECTRE:
-        prepared = prepare_spectre_input(image, mask, centering=centering)
+        prepared = prepare_spectre_input(image)
         tokens, _ = encode_spectre(
             encoder, prepared.data, expected_grid=prepared.grid_size
         )
@@ -167,10 +172,10 @@ def _encode_foundation_case(
         patch_embeddings = tokens[1:]
         dimension = SPECTRE_EMBEDDING_DIMENSION
         valid_counts = np.full(
-            patch_embeddings.shape[0], int(np.prod(SPECTRE_CROP_SIZE)), dtype=np.int64
+            patch_embeddings.shape[0], prepared.valid_voxel_count, dtype=np.int64
         )
     elif encoder_name is ImageEncoderName.MERLIN:
-        prepared = prepare_merlin_input(image, mask, centering=centering)
+        prepared = prepare_merlin_input(image)
         patient_embedding = encode_merlin(encoder, prepared.data)
         patch_embeddings = patient_embedding[None]
         dimension = MERLIN_EMBEDDING_DIMENSION
@@ -188,17 +193,19 @@ def _encode_foundation_case(
         "status": "embedded",
         "reason": None,
         "encoder": encoder_name.value,
-        "roi_target": case.roi_target,
-        "native_roi_shape": native_shape,
-        "resampled_shape": prepared.metadata.get("target_shape"),
+        "native_ct_shape": native_shape,
+        "resampled_shape": prepared.metadata.get("resampled_shape"),
         "patch_count": int(patch_embeddings.shape[0]),
         "embedding_dimension": dimension,
         "inference_seconds": round(inference_seconds, 3),
-        "roi_ct_sha256": roi_sha256,
+        "ct_series_sha256": ct_series_digest,
     }
     record = {
         **summary,
-        "roi_pancreas_mask_sha256": mask_sha256,
+        "study_uid": volume.study_uid,
+        "series_uid": volume.series_uid,
+        "selected_instance_numbers": list(volume.selected_instance_numbers),
+        "selected_sop_instance_uids": list(volume.selected_sop_instance_uids),
         "native_affine": np.asarray(image.affine).tolist(),
         "grid_size": list(prepared.grid_size),
         "patch_starts": prepared.patch_starts.tolist(),
@@ -219,13 +226,8 @@ def _encode_foundation_case(
 def _foundation_manifest(
     encoder_name: ImageEncoderName,
     artifacts: FoundationModelArtifacts,
-    centering: CenteringMode,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], int]:
-    centering_text = (
-        "predicted pancreas bounding-box center"
-        if centering is CenteringMode.PANCREAS
-        else "CT volume center"
-    )
+    centering_text = "CT volume center"
     if encoder_name is ImageEncoderName.SPECTRE:
         return (
             {
@@ -250,8 +252,7 @@ def _foundation_manifest(
                 "hu_clip": list(SPECTRE_HU_RANGE),
                 "crop_size": list(SPECTRE_CROP_SIZE),
                 "centering": centering_text,
-                "margin_mm": 15.0,
-                "padding": "-1000 HU to whole crop-grid multiples",
+                "padding": "-1000 HU outside the selected CT volume",
             },
             SPECTRE_EMBEDDING_DIMENSION,
         )
@@ -283,21 +284,19 @@ def _foundation_manifest(
 
 
 def run_embedding(
-    roi_run: Path,
+    dicom_root: Path,
     output_root: Path,
     model_cache: Path,
     *,
+    workbook_path: Path,
     encoder_name: ImageEncoderName = ImageEncoderName.SPECTRE,
     run_dir: Path | None = None,
     patients: set[str] | None = None,
-    centering: CenteringMode = CenteringMode.VOLUME,
     resume: bool = True,
     force: bool = False,
     local_model_only: bool = False,
 ) -> Path:
-    cases = discover_roi_cases(roi_run, patients)
-    if any(case.roi_target != "pancreas" for case in cases):
-        raise ValueError("SPECTRE and Merlin require an ROI run with roi_target=pancreas")
+    cases = discover_ct_series_cases(dicom_root, workbook_path, patients)
     destination = run_dir or create_run_directory(output_root / encoder_name.value)
     destination.mkdir(parents=True, exist_ok=True)
     state_dir = destination / ".state"
@@ -310,8 +309,8 @@ def run_embedding(
     )
     encoder, runtime = load_foundation_runtime(encoder_name, foundation_artifacts)
     model_fingerprint = ":".join(foundation_artifacts.hashes)
-    model_manifest, feature_manifest, preprocessing_manifest, dimension = (
-        _foundation_manifest(encoder_name, foundation_artifacts, centering)
+    model_manifest, feature_manifest, preprocessing_manifest, dimension = _foundation_manifest(
+        encoder_name, foundation_artifacts
     )
 
     completed: list[CaseEncoding] = []
@@ -320,22 +319,20 @@ def run_embedding(
     failures: list[dict[str, Any]] = []
     started_run = time.perf_counter()
     for case in cases:
-        roi_sha256 = sha256_file(case.roi_ct_path)
-        mask_sha256 = (
-            sha256_file(case.roi_pancreas_mask_path)
-            if case.roi_pancreas_mask_path is not None
-            else None
+        volume = load_dicom_volume(
+            case.patient_dir,
+            patient_id=case.patient_id,
+            selection=SeriesKey(case.study_uid, case.series_uid),
         )
+        ct_series_digest = series_sha256(volume.files)
         state_json, state_npz = _state_paths(state_dir, case.patient_id)
         cached = (
             _load_cached_case(
                 state_json,
                 state_npz,
-                roi_sha256=roi_sha256,
-                mask_sha256=mask_sha256,
+                ct_series_sha256=ct_series_digest,
                 encoder_name=encoder_name,
                 model_fingerprint=model_fingerprint,
-                centering=centering,
             )
             if resume and not force
             else None
@@ -346,7 +343,9 @@ def run_embedding(
             records.append(cached.record)
             continue
         try:
-            encoded = _encode_foundation_case(encoder, case, encoder_name, centering)
+            encoded = _encode_foundation_case(
+                encoder, case, volume, ct_series_digest, encoder_name
+            )
             completed.append(encoded)
             rows.append(encoded.summary)
             records.append(encoded.record)
@@ -360,11 +359,9 @@ def run_embedding(
             write_json(
                 {
                     "patient_id": case.patient_id,
-                    "roi_ct_sha256": roi_sha256,
-                    "roi_pancreas_mask_sha256": mask_sha256,
+                    "ct_series_sha256": ct_series_digest,
                     "encoder": encoder_name.value,
                     "model_fingerprint": model_fingerprint,
-                    "centering": centering.value,
                     "summary": encoded.summary,
                     "record": encoded.record,
                 },
@@ -376,8 +373,7 @@ def run_embedding(
                 "status": "failed",
                 "reason": f"{type(error).__name__}: {error}",
                 "encoder": encoder_name.value,
-                "roi_target": case.roi_target,
-                "roi_ct_sha256": roi_sha256,
+                "ct_series_sha256": ct_series_digest,
             }
             rows.append(failure)
             records.append(failure)
@@ -426,17 +422,18 @@ def run_embedding(
         embeddings=patch_embeddings,
     )
     write_summary(rows, destination / "embedding_summary.csv", EMBEDDING_SUMMARY_COLUMNS)
-    source_manifest = roi_run / "run_manifest.json"
+    source_manifest = dicom_root / "curation_manifest.json"
     status_counts = dict(Counter(row["status"] for row in rows))
     write_json(
         {
             "pipeline_version": __version__,
-            "stage": f"{encoder_name.value}_pancreas_roi_embedding",
+            "stage": f"{encoder_name.value}_selected_ct_embedding",
             "encoder": encoder_name.value,
             "status": "complete" if not failures else "completed_with_failures",
-            "roi_run": str(roi_run.resolve()),
-            "roi_run_manifest_sha256": sha256_file(source_manifest),
-            "strict_pancreas_mask_required": True,
+            "dicom_root": str(dicom_root.resolve()),
+            "workbook": str(workbook_path.resolve()),
+            "source_curation_manifest_sha256": sha256_file(source_manifest),
+            "source_kind": "workbook-selected CT series range",
             "model": model_manifest,
             "feature_extraction": feature_manifest,
             "preprocessing": preprocessing_manifest,

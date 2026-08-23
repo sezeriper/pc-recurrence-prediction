@@ -1,7 +1,7 @@
 [project]
 name = "pc-recurrence-prediction"
 version = "0.1.0"
-description = "Pancreatic CT image ROI detection and SPECTRE/Merlin embedding generation"
+description = "Curated pancreatic CT embedding and recurrence classification"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [
@@ -12,8 +12,9 @@ dependencies = [
 ]
 
 [project.scripts]
-pc-image-roi = "pc_recurrence.image_roi.cli:app"
+pc-image-data = "pc_recurrence.image_data.cli:app"
 pc-image-embed = "pc_recurrence.image_embedding.cli:app"
+pc-recurrence-classify = "pc_recurrence.recurrence_classifier.cli:app"
 
 [project.optional-dependencies]
 imaging = [

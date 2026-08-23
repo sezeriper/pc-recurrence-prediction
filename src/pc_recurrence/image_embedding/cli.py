@@ -5,16 +5,13 @@ from typing import Annotated
 
 import typer
 
-from .constants import (
-    DEFAULT_MODEL_CACHE,
-    DEFAULT_OUTPUT_ROOT,
-    CenteringMode,
-    ImageEncoderName,
-)
+from pc_recurrence.image_data.constants import DEFAULT_DICOM_ROOT, DEFAULT_WORKBOOK
+
+from .constants import DEFAULT_MODEL_CACHE, DEFAULT_OUTPUT_ROOT, ImageEncoderName
 
 app = typer.Typer(
     no_args_is_help=True,
-    help="Extract SPECTRE or Merlin embeddings from 3D CT ROIs.",
+    help="Extract SPECTRE or Merlin embeddings from selected CT series ranges.",
 )
 
 
@@ -25,13 +22,13 @@ def _selected_patients(value: str | None) -> set[str] | None:
 
 
 def _run(
-    roi_run: Path,
+    dicom_root: Path,
+    workbook: Path,
     encoder: ImageEncoderName,
     output_root: Path,
     model_cache: Path,
     run_dir: Path | None,
     patients: str | None,
-    centering: CenteringMode,
     resume: bool,
     force: bool,
     *,
@@ -40,13 +37,13 @@ def _run(
     from .pipeline import run_embedding
 
     destination = run_embedding(
-        roi_run=roi_run,
+        dicom_root=dicom_root,
+        workbook_path=workbook,
         encoder_name=encoder,
         output_root=output_root,
         model_cache=model_cache,
         run_dir=run_dir,
         patients=_selected_patients(patients),
-        centering=centering,
         resume=resume,
         force=force,
         local_model_only=local_model_only,
@@ -56,30 +53,27 @@ def _run(
 
 @app.command()
 def embed(
-    roi_run: Annotated[Path, typer.Option(exists=True, file_okay=False)],
+    dicom_root: Annotated[Path, typer.Option(exists=True, file_okay=False)] = DEFAULT_DICOM_ROOT,
+    workbook: Annotated[Path, typer.Option(exists=True, dir_okay=False)] = DEFAULT_WORKBOOK,
     encoder: Annotated[ImageEncoderName, typer.Option()] = ImageEncoderName.SPECTRE,
     output_root: Annotated[Path, typer.Option()] = DEFAULT_OUTPUT_ROOT,
     model_cache: Annotated[Path, typer.Option()] = DEFAULT_MODEL_CACHE,
     run_dir: Annotated[Path | None, typer.Option()] = None,
     patients: Annotated[
-        str | None, typer.Option(help="Comma-separated patient ROI directory names.")
+        str | None, typer.Option(help="Comma-separated workbook patient IDs or DICOM folders.")
     ] = None,
-    centering: Annotated[
-        CenteringMode,
-        typer.Option(help="Crop centering: predicted pancreas bbox or CT volume center."),
-    ] = CenteringMode.VOLUME,
     resume: Annotated[bool, typer.Option("--resume/--no-resume")] = True,
     force: Annotated[bool, typer.Option("--force")] = False,
 ) -> None:
-    """Encode ROIs using an already cached and checksum-verified checkpoint."""
+    """Encode selected CT ranges using an already cached and verified checkpoint."""
     _run(
-        roi_run,
+        dicom_root,
+        workbook,
         encoder,
         output_root,
         model_cache,
         run_dir,
         patients,
-        centering,
         resume,
         force,
         local_model_only=True,
@@ -88,30 +82,27 @@ def embed(
 
 @app.command(name="run")
 def run_pipeline(
-    roi_run: Annotated[Path, typer.Option(exists=True, file_okay=False)],
+    dicom_root: Annotated[Path, typer.Option(exists=True, file_okay=False)] = DEFAULT_DICOM_ROOT,
+    workbook: Annotated[Path, typer.Option(exists=True, dir_okay=False)] = DEFAULT_WORKBOOK,
     encoder: Annotated[ImageEncoderName, typer.Option()] = ImageEncoderName.SPECTRE,
     output_root: Annotated[Path, typer.Option()] = DEFAULT_OUTPUT_ROOT,
     model_cache: Annotated[Path, typer.Option()] = DEFAULT_MODEL_CACHE,
     run_dir: Annotated[Path | None, typer.Option()] = None,
     patients: Annotated[
-        str | None, typer.Option(help="Comma-separated patient ROI directory names.")
+        str | None, typer.Option(help="Comma-separated workbook patient IDs or DICOM folders.")
     ] = None,
-    centering: Annotated[
-        CenteringMode,
-        typer.Option(help="Crop centering: predicted pancreas bbox or CT volume center."),
-    ] = CenteringMode.VOLUME,
     resume: Annotated[bool, typer.Option("--resume/--no-resume")] = True,
     force: Annotated[bool, typer.Option("--force")] = False,
 ) -> None:
-    """Acquire the selected pinned checkpoint and encode all selected ROIs."""
+    """Acquire the selected pinned checkpoint and encode selected CT ranges."""
     _run(
-        roi_run,
+        dicom_root,
+        workbook,
         encoder,
         output_root,
         model_cache,
         run_dir,
         patients,
-        centering,
         resume,
         force,
         local_model_only=False,

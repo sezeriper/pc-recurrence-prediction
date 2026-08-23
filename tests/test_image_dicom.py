@@ -10,8 +10,8 @@ import pytest
 from pydicom.dataset import FileDataset, FileMetaDataset
 from pydicom.uid import CTImageStorage, ExplicitVRLittleEndian, generate_uid
 
-from pc_recurrence.image_roi.constants import DEFAULT_DICOM_ROOT
-from pc_recurrence.image_roi.dicom import (
+from pc_recurrence.image_data.constants import DEFAULT_DICOM_ROOT
+from pc_recurrence.image_data.dicom import (
     DicomGeometryError,
     SeriesKey,
     discover_dicom_series,
@@ -21,7 +21,7 @@ from pc_recurrence.image_roi.dicom import (
     parse_image_range,
     select_series_files,
 )
-from pc_recurrence.image_roi.pipeline import inspect_dataset
+from pc_recurrence.image_data.inspection import inspect_dataset
 
 DEFAULT_STUDY_UID = "1.2.826.0.1.3680043.10.1000"
 

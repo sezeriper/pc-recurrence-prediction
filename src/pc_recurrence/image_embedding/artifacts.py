@@ -9,11 +9,10 @@ EMBEDDING_SUMMARY_COLUMNS = (
     "status",
     "reason",
     "encoder",
-    "roi_target",
-    "native_roi_shape",
+    "native_ct_shape",
     "resampled_shape",
     "patch_count",
     "embedding_dimension",
     "inference_seconds",
-    "roi_ct_sha256",
+    "ct_series_sha256",
 )

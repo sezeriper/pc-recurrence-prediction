@@ -1,21 +1,18 @@
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
-from itertools import product
+from typing import cast
 
 import nibabel as nib
 import numpy as np
-from nibabel.processing import resample_from_to, resample_to_output
-
-from pc_recurrence.image_roi.constants import ROI_MARGIN_MM
+from nibabel.affines import voxel_sizes
+from nibabel.processing import resample_to_output
 
 from .constants import (
     MERLIN_HU_RANGE,
     MERLIN_INPUT_SIZE,
     MERLIN_TARGET_SPACING_MM,
     SPECTRE_CROP_SIZE,
-    CenteringMode,
 )
 
 
@@ -28,41 +25,18 @@ class FoundationInput:
     metadata: dict[str, object]
 
 
-def _canonical_pair(
-    ct_image: nib.Nifti1Image, mask_image: nib.Nifti1Image
-) -> tuple[nib.Nifti1Image, nib.Nifti1Image]:
+def _canonical_ct(ct_image: nib.Nifti1Image) -> nib.Nifti1Image:
     ct = nib.as_closest_canonical(ct_image)
-    mask = nib.as_closest_canonical(mask_image)
-    if mask.shape != ct.shape or not np.allclose(mask.affine, ct.affine, atol=1e-4):
-        mask = resample_from_to(mask, (ct.shape, ct.affine), order=0, mode="constant", cval=0)
-    return ct, mask
-
-
-def _validated_arrays(
-    ct_image: nib.Nifti1Image, mask_image: nib.Nifti1Image
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    ct, mask = _canonical_pair(ct_image, mask_image)
     data = np.asarray(ct.dataobj, dtype=np.float32)
-    pancreas = np.asarray(mask.dataobj) > 0
     if data.ndim != 3 or any(size < 1 for size in data.shape):
-        raise ValueError(f"ROI must be a non-empty 3D volume; received {data.shape}")
+        raise ValueError(f"CT must be a non-empty 3D volume; received {data.shape}")
     if not np.isfinite(data).all():
-        raise ValueError("ROI contains non-finite CT values")
-    if not pancreas.any():
-        raise ValueError("ROI pancreas mask is empty")
-    return data, pancreas, np.asarray(ct.affine, dtype=np.float64)
-
-
-def _mask_bounds(mask: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    coordinates = np.argwhere(mask)
-    start = coordinates.min(axis=0)
-    stop = coordinates.max(axis=0) + 1
-    center = (start + stop - 1) / 2.0
-    return start, stop, center
+        raise ValueError("CT contains non-finite values")
+    return ct
 
 
 def _volume_center(shape: tuple[int, ...] | np.ndarray) -> np.ndarray:
-    """Geometric center of a volume in voxel coordinates."""
+    """Geometric center of a selected CT volume in voxel coordinates."""
     return (np.asarray(shape, dtype=np.float64) - 1) / 2.0
 
 
@@ -91,76 +65,43 @@ def centered_crop_or_pad(
         for low, high in zip(destination_start, destination_stop, strict=True)
     )
     output[destination_slices] = data[source_slices]
-    pad_before = tuple(int(value) for value in destination_start)
-    pad_after = tuple(int(value) for value in target - destination_stop)
+    pad_before = cast(tuple[int, int, int], tuple(int(value) for value in destination_start))
+    pad_after = cast(tuple[int, int, int], tuple(int(value) for value in target - destination_stop))
     return np.ascontiguousarray(output), pad_before, pad_after
 
 
-def prepare_spectre_input(
-    ct_image: nib.Nifti1Image,
-    mask_image: nib.Nifti1Image,
-    *,
-    margin_mm: float = ROI_MARGIN_MM,
-    centering: CenteringMode = CenteringMode.VOLUME,
-) -> FoundationInput:
-    data, mask, affine = _validated_arrays(ct_image, mask_image)
-    start, stop, mask_center = _mask_bounds(mask)
-    spacing = nib.affines.voxel_sizes(affine)
-    margin_voxels = np.ceil(margin_mm / spacing).astype(np.int64)
-    required = stop - start + 2 * margin_voxels
-    target_shape = tuple(
-        max(crop, int(math.ceil(size / crop)) * crop)
-        for size, crop in zip(required, SPECTRE_CROP_SIZE, strict=True)
-    )
-    center = (
-        mask_center
-        if centering is CenteringMode.PANCREAS
-        else _volume_center(data.shape)
-    )
+def prepare_spectre_input(ct_image: nib.Nifti1Image) -> FoundationInput:
+    ct = _canonical_ct(ct_image)
+    data = np.asarray(ct.dataobj, dtype=np.float32)
+    affine = np.asarray(ct.affine, dtype=np.float64)
+    center = _volume_center(data.shape)
     cropped, pad_before, pad_after = centered_crop_or_pad(
-        data, center, target_shape, fill_value=-1000.0
+        data, center, SPECTRE_CROP_SIZE, fill_value=-1000.0
     )
-    grid = tuple(
-        size // crop for size, crop in zip(target_shape, SPECTRE_CROP_SIZE, strict=True)
-    )
-    starts = np.asarray(
-        [
-            tuple(index * crop for index, crop in zip(indices, SPECTRE_CROP_SIZE, strict=True))
-            for indices in product(*(range(size) for size in grid))
-        ],
-        dtype=np.int32,
-    )
+    metadata: dict[str, object] = {
+        "orientation": "RAS",
+        "spacing_mm": [float(value) for value in voxel_sizes(affine)],
+        "source_shape": list(data.shape),
+        "centering": "volume",
+        "volume_center_voxel": center.tolist(),
+        "crop_center_voxel": center.tolist(),
+        "target_shape": list(SPECTRE_CROP_SIZE),
+        "pad_before": list(pad_before),
+        "pad_after": list(pad_after),
+        "fill_hu": -1000.0,
+    }
+    valid_shape = np.asarray(SPECTRE_CROP_SIZE) - pad_before - pad_after
     return FoundationInput(
         data=cropped,
-        grid_size=grid,
-        patch_starts=starts,
-        valid_voxel_count=int(np.prod(np.asarray(target_shape) - pad_before - pad_after)),
-        metadata={
-            "orientation": "RAS",
-            "spacing_mm": [float(value) for value in spacing],
-            "source_shape": list(data.shape),
-            "centering": centering.value,
-            "crop_center_voxel": center.tolist(),
-            "pancreas_bbox_start": start.tolist(),
-            "pancreas_bbox_stop": stop.tolist(),
-            "pancreas_center_voxel": mask_center.tolist(),
-            "volume_center_voxel": _volume_center(data.shape).tolist(),
-            "target_shape": list(target_shape),
-            "pad_before": list(pad_before),
-            "pad_after": list(pad_after),
-            "margin_mm": margin_mm,
-            "fill_hu": -1000.0,
-        },
+        grid_size=(1, 1, 1),
+        patch_starts=np.zeros((1, 3), dtype=np.int32),
+        valid_voxel_count=int(np.prod(valid_shape)),
+        metadata=metadata,
     )
 
 
-def prepare_merlin_input(
-    ct_image: nib.Nifti1Image,
-    mask_image: nib.Nifti1Image,
-    *,
-    centering: CenteringMode = CenteringMode.VOLUME,
-) -> FoundationInput:
-    canonical_ct, canonical_mask = _canonical_pair(ct_image, mask_image)
+def prepare_merlin_input(ct_image: nib.Nifti1Image) -> FoundationInput:
+    canonical_ct = _canonical_ct(ct_image)
     resampled_ct = resample_to_output(
         canonical_ct,
         voxel_sizes=MERLIN_TARGET_SPACING_MM,
@@ -168,51 +109,35 @@ def prepare_merlin_input(
         mode="constant",
         cval=-1000.0,
     )
-    resampled_mask = resample_from_to(
-        canonical_mask,
-        (resampled_ct.shape, resampled_ct.affine),
-        order=0,
-        mode="constant",
-        cval=0,
-    )
     data = np.asarray(resampled_ct.dataobj, dtype=np.float32)
-    mask = np.asarray(resampled_mask.dataobj) > 0
     if not np.isfinite(data).all():
-        raise ValueError("resampled ROI contains non-finite CT values")
-    if not mask.any():
-        raise ValueError("resampled ROI pancreas mask is empty")
-    start, stop, mask_center = _mask_bounds(mask)
-    center = (
-        mask_center
-        if centering is CenteringMode.PANCREAS
-        else _volume_center(data.shape)
-    )
+        raise ValueError("resampled CT contains non-finite values")
+    center = _volume_center(data.shape)
     cropped, pad_before, pad_after = centered_crop_or_pad(
         data, center, MERLIN_INPUT_SIZE, fill_value=-1000.0
     )
     low, high = MERLIN_HU_RANGE
     cropped = np.clip(cropped, low, high)
     cropped = ((cropped - low) / (high - low)).astype(np.float32, copy=False)
+    metadata: dict[str, object] = {
+        "orientation": "RAS",
+        "spacing_mm": list(MERLIN_TARGET_SPACING_MM),
+        "resampled_shape": list(data.shape),
+        "centering": "volume",
+        "volume_center_voxel": center.tolist(),
+        "crop_center_voxel": center.tolist(),
+        "target_shape": list(MERLIN_INPUT_SIZE),
+        "pad_before": list(pad_before),
+        "pad_after": list(pad_after),
+        "hu_clip": list(MERLIN_HU_RANGE),
+        "intensity_range": [0.0, 1.0],
+        "fill_hu": -1000.0,
+    }
+    valid_shape = np.asarray(MERLIN_INPUT_SIZE) - pad_before - pad_after
     return FoundationInput(
         data=np.ascontiguousarray(cropped),
         grid_size=(1, 1, 1),
         patch_starts=np.zeros((1, 3), dtype=np.int32),
-        valid_voxel_count=int(np.prod(np.asarray(MERLIN_INPUT_SIZE) - pad_before - pad_after)),
-        metadata={
-            "orientation": "RAS",
-            "spacing_mm": list(MERLIN_TARGET_SPACING_MM),
-            "resampled_shape": list(data.shape),
-            "centering": centering.value,
-            "crop_center_voxel": center.tolist(),
-            "pancreas_bbox_start": start.tolist(),
-            "pancreas_bbox_stop": stop.tolist(),
-            "pancreas_center_voxel": mask_center.tolist(),
-            "volume_center_voxel": _volume_center(data.shape).tolist(),
-            "target_shape": list(MERLIN_INPUT_SIZE),
-            "pad_before": list(pad_before),
-            "pad_after": list(pad_after),
-            "hu_clip": list(MERLIN_HU_RANGE),
-            "intensity_range": [0.0, 1.0],
-            "fill_hu": -1000.0,
-        },
+        valid_voxel_count=int(np.prod(valid_shape)),
+        metadata=metadata,
     )

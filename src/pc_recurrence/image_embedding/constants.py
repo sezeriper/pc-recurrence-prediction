@@ -12,9 +12,6 @@ class ImageEncoderName(StrEnum):
     MERLIN = "merlin"
 
 
-class CenteringMode(StrEnum):
-    PANCREAS = "pancreas"
-    VOLUME = "volume"
 
 
 SPECTRE_REPOSITORY = "cclaess/SPECTRE"
