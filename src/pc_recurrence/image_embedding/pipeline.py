@@ -74,11 +74,25 @@ class CaseEncoding:
     record: dict[str, Any]
 
 
+class CtSeriesDiscovery(list[CtSeriesCase]):
+    """Eligible curated series plus auditable rows excluded before model loading."""
+
+    def __init__(self, cases: list[CtSeriesCase], skipped: list[dict[str, Any]]) -> None:
+        super().__init__(cases)
+        self.skipped = skipped
+
+
+def _skipped_discovery_row(patient_id: str, reason: str) -> dict[str, str]:
+    return {"patient_id": patient_id, "status": "skipped", "reason": reason}
+
+
 def discover_ct_series_cases(
     dicom_root: Path,
     workbook_path: Path,
     patients: set[str] | None = None,
-) -> list[CtSeriesCase]:
+    *,
+    skip_unavailable: bool = True,
+) -> CtSeriesDiscovery:
     if not dicom_root.is_dir():
         raise ValueError(f"curated DICOM directory does not exist: {dicom_root}")
     curation_manifest = dicom_root / "curation_manifest.json"
@@ -86,11 +100,20 @@ def discover_ct_series_cases(
         raise ValueError(f"curated DICOM directory has no curation_manifest.json: {dicom_root}")
     rows = select_image_workbook_rows(load_image_workbook(workbook_path), patients)
     cases: list[CtSeriesCase] = []
+    skipped: list[dict[str, Any]] = []
     for row in rows:
         if row.dicom_folder is None:
+            reason = "workbook has no DICOM folder mapping"
+            if skip_unavailable:
+                skipped.append(_skipped_discovery_row(row.patient_id, reason))
+                continue
             raise ValueError(f"Patient {row.patient_id!r} has no DICOM folder mapping")
         patient_dir = dicom_root / row.dicom_folder
         if not patient_dir.is_dir():
+            reason = "no curated CT series directory"
+            if skip_unavailable:
+                skipped.append(_skipped_discovery_row(row.patient_id, reason))
+                continue
             raise ValueError(f"Patient {row.patient_id!r} has no curated CT series directory")
         inspection = inspect_patient(patient_dir, patient_id=row.patient_id)
         if (
@@ -98,6 +121,13 @@ def discover_ct_series_cases(
             or inspection.study_uid is None
             or inspection.series_uid is None
         ):
+            reason = (
+                "curated CT series is invalid: "
+                f"{inspection.reason or inspection.geometry_status}"
+            )
+            if skip_unavailable:
+                skipped.append(_skipped_discovery_row(row.patient_id, reason))
+                continue
             raise ValueError(
                 f"Patient {row.patient_id!r} curated CT series is invalid: "
                 f"{inspection.reason or inspection.geometry_status}"
@@ -110,9 +140,9 @@ def discover_ct_series_cases(
                 series_uid=inspection.series_uid,
             )
         )
-    if not cases:
+    if not cases and not skip_unavailable:
         raise ValueError("the selected workbook cohort contains no curated CT series")
-    return cases
+    return CtSeriesDiscovery(cases, skipped)
 
 
 def _safe_state_name(patient_id: str) -> str:
@@ -295,8 +325,20 @@ def run_embedding(
     resume: bool = True,
     force: bool = False,
     local_model_only: bool = False,
+    skip_unavailable: bool = True,
 ) -> Path:
-    cases = discover_ct_series_cases(dicom_root, workbook_path, patients)
+    discovery = (
+        discover_ct_series_cases(
+            dicom_root,
+            workbook_path,
+            patients,
+            skip_unavailable=True,
+        )
+        if skip_unavailable
+        else discover_ct_series_cases(dicom_root, workbook_path, patients)
+    )
+    cases = list(discovery)
+    discovery_failures = list(getattr(discovery, "skipped", []))
     destination = run_dir or create_run_directory(output_root / encoder_name.value)
     destination.mkdir(parents=True, exist_ok=True)
     state_dir = destination / ".state"
@@ -314,9 +356,11 @@ def run_embedding(
     )
 
     completed: list[CaseEncoding] = []
-    rows: list[dict[str, Any]] = []
-    records: list[dict[str, Any]] = []
-    failures: list[dict[str, Any]] = []
+    rows: list[dict[str, Any]] = [
+        {**failure, "encoder": encoder_name.value} for failure in discovery_failures
+    ]
+    records: list[dict[str, Any]] = rows.copy()
+    failures: list[dict[str, Any]] = rows.copy()
     started_run = time.perf_counter()
     for case in cases:
         volume = load_dicom_volume(
@@ -434,6 +478,7 @@ def run_embedding(
             "workbook": str(workbook_path.resolve()),
             "source_curation_manifest_sha256": sha256_file(source_manifest),
             "source_kind": "workbook-selected CT series range",
+            "skip_unavailable": skip_unavailable,
             "model": model_manifest,
             "feature_extraction": feature_manifest,
             "preprocessing": preprocessing_manifest,

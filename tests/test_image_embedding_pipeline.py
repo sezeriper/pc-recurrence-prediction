@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -10,6 +11,31 @@ from pc_recurrence.image_data.dicom import DicomVolume
 from pc_recurrence.image_embedding import pipeline
 from pc_recurrence.image_embedding.constants import ImageEncoderName
 from pc_recurrence.image_embedding.foundation_models import FoundationModelArtifacts, RuntimeInfo
+
+
+def test_discovery_can_skip_missing_curated_patient_directories(
+    tmp_path: Path, monkeypatch
+) -> None:
+    dicom_root = tmp_path / "dicom_selected"
+    dicom_root.mkdir()
+    (dicom_root / "curation_manifest.json").write_text("{}", encoding="utf-8")
+    row = SimpleNamespace(patient_id="Patient without images", dicom_folder="PATIENT404")
+    monkeypatch.setattr(pipeline, "load_image_workbook", lambda _path: [row])
+    monkeypatch.setattr(pipeline, "select_image_workbook_rows", lambda rows, _patients: rows)
+
+    discovery = pipeline.discover_ct_series_cases(
+        dicom_root,
+        tmp_path / "workbook.xlsx",
+    )
+
+    assert discovery == []
+    assert discovery.skipped == [
+        {
+            "patient_id": "Patient without images",
+            "status": "skipped",
+            "reason": "no curated CT series directory",
+        }
+    ]
 
 
 def _selected_ct_source(
@@ -35,7 +61,7 @@ def _selected_ct_source(
         selected_instance_numbers=tuple(range(20)),
         selected_sop_instance_uids=tuple(f"sop-{index}" for index in range(20)),
     )
-    monkeypatch.setattr(pipeline, "discover_ct_series_cases", lambda *_args: [case])
+    monkeypatch.setattr(pipeline, "discover_ct_series_cases", lambda *_args, **_kwargs: [case])
     monkeypatch.setattr(pipeline, "load_dicom_volume", lambda *_args, **_kwargs: volume)
     monkeypatch.setattr(pipeline, "series_sha256", lambda _files: "C" * 64)
     return dicom_root, workbook, case

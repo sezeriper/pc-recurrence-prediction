@@ -22,7 +22,11 @@ from pc_recurrence.image_data.constants import (
 )
 from pc_recurrence.image_data.dicom import SeriesKey
 from pc_recurrence.image_data.inspection import inspect_dataset
-from pc_recurrence.image_data.preprocess import curate_dataset, write_curation_report
+from pc_recurrence.image_data.preprocess import (
+    UNAVAILABLE_SKIP_REASON,
+    curate_dataset,
+    write_curation_report,
+)
 from pc_recurrence.image_data.scan_selection import (
     SCAN_SELECTION_COLUMNS,
     write_scan_inventory,
@@ -246,6 +250,32 @@ def test_selection_preflight_fails_before_output_mutation(tmp_path: Path, mode: 
     assert first != second
 
 
+def test_curation_can_skip_only_patients_without_ready_series(tmp_path: Path) -> None:
+    source = tmp_path / "dicom"
+    (source / "PATIENT111").mkdir(parents=True)
+    selected = _write_series(source, "PATIENT222", 3)
+    workbook = tmp_path / "workbook.xlsx"
+    _write_workbook(
+        workbook,
+        [_row("Patient 1", 111, "0-1"), _row("Patient 2", 222, "0-1")],
+    )
+    selection = _inventory(source, workbook, tmp_path / "review")
+    _select(selection, "Patient 2", selected.series_uid)
+
+    output = tmp_path / "curated"
+    report = curate_dataset(source, output, workbook, selection)
+
+    assert [patient.status for patient in report.patients] == ["skipped", "copied"]
+    assert report.patients[0].reason == UNAVAILABLE_SKIP_REASON
+    assert (output / "PATIENT222").is_dir()
+    assert not (output / "PATIENT111").exists()
+
+    _, manifest_path = write_curation_report(report)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["status"] == "complete_with_skips"
+    assert manifest["policy"]["allow_unselected_without_ready_series"] is True
+
+
 def test_exact_choice_applies_range_and_replaces_prior_series(tmp_path: Path) -> None:
     source = tmp_path / "dicom"
     first = _write_series(source, "PATIENT111", 5, prefix="first", series_number=1)
@@ -415,4 +445,4 @@ def test_cli_help_describes_review_contract() -> None:
     assert inventory_help.exit_code == 0
     assert "editable CT Series inventory" in inventory_help.output
     assert preprocess_help.exit_code == 0
-    assert "selected=yes Series" in preprocess_help.output
+    assert "Inventory CSV" in preprocess_help.output

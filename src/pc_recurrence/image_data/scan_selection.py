@@ -518,6 +518,7 @@ def load_scan_selections(
     workbook_path: Path,
     *,
     patients: set[str] | None = None,
+    allow_unselected: bool = True,
 ) -> dict[str, PatientSeriesSelection]:
     document = read_scan_selection(selection_path)
     workbook_rows_all = load_image_workbook(workbook_path)
@@ -576,6 +577,9 @@ def load_scan_selections(
 
         identifier = document.selected_candidate_ids.get(patient_id)
         if identifier is None:
+            has_ready_candidate = any(row["status"] == "ready" for row in patient_live)
+            if allow_unselected and not has_ready_candidate:
+                continue
             errors.append(f"{patient_id} requires exactly one selected=yes row; found 0")
             continue
         live = live_candidates.get(identifier)

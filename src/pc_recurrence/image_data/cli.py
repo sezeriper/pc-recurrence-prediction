@@ -140,9 +140,16 @@ def preprocess(
         str | None, typer.Option(help="Comma-separated workbook patient IDs or DICOM folder names.")
     ] = None,
     force: Annotated[bool, typer.Option("--force")] = False,
+    skip_unavailable: Annotated[
+        bool,
+        typer.Option(
+            "--skip-unavailable/--require-all",
+            help="Skip patients with no ready CT Series (default), or require every patient.",
+        ),
+    ] = True,
 ) -> None:
     """Curate exact operator-selected CT Series ranges for downstream tasks."""
-    from .preprocess import curate_dataset, write_curation_report
+    from .preprocess import UNAVAILABLE_SKIP_REASON, curate_dataset, write_curation_report
 
     try:
         report = curate_dataset(
@@ -152,6 +159,7 @@ def preprocess(
             selection,
             patients=_selected_patients(patients),
             force=force,
+            allow_unselected=skip_unavailable,
         )
     except (FileNotFoundError, ValueError) as error:
         typer.echo(str(error), err=True)
@@ -160,7 +168,10 @@ def preprocess(
     for patient in report.patients:
         outcome = patient.reason or "range copied"
         typer.echo(f"{patient.patient_id}: {patient.status} ({outcome})")
-    if report.failures:
+    unexpected_failures = [
+        patient for patient in report.failures if patient.reason != UNAVAILABLE_SKIP_REASON
+    ]
+    if unexpected_failures or (report.failures and not skip_unavailable):
         raise typer.Exit(code=1)
     typer.echo(str(output_dir.resolve()))
 

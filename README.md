@@ -20,6 +20,13 @@ uv sync --extra imaging --group dev
 Run commands through `uv run`; no separate interpreter or hardware-specific constraints file is
 required. PyTorch uses the first available CUDA device, then Apple MPS, and otherwise CPU.
 
+### Google Colab
+
+Open `pc_recurrence_colab.ipynb` in Google Colab for a GPU-ready, resumable SPECTRE embedding
+workflow that clones this repository, installs the pinned environment, and stores the ignored
+dataset and generated artifacts in Google Drive. Read the notebook prerequisites first; patient
+data and curated DICOMs are deliberately absent from Git.
+
 ## CT series curation
 
 Source DICOM and the workbook are read from `dataset/`, which remains read-only. Generated review
@@ -85,6 +92,19 @@ Preprocessing fails closed unless every targeted patient has one live `ready` ch
 gaps and duplicate slice positions are warnings rather than selection blockers. Study UID, Series
 UID, selected SOP Instance UIDs, and geometry warnings remain in the curation and inspection
 manifests.
+
+If a workbook row has no `ready` CT series (for example, no usable images), preprocessing retains
+it as an audited skip and continues curating the rest of the cohort by default:
+
+```shell
+uv run pc-image-data preprocess
+```
+
+This only permits an unselected patient that has no live `ready` candidate. It still fails
+for an omitted selection where a ready candidate exists, or for a selected-series curation error.
+The resulting manifest records the skipped patient. Embedding also skips missing or invalid
+curated patient folders by default and records them in the embedding summary and run manifest. Use
+`--require-all` with either command to restore the former strict all-patients-must-be-valid gate.
 
 ## Image embeddings
 

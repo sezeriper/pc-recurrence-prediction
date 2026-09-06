@@ -31,6 +31,7 @@ def _run(
     patients: str | None,
     resume: bool,
     force: bool,
+    skip_unavailable: bool,
     *,
     local_model_only: bool,
 ) -> None:
@@ -47,6 +48,7 @@ def _run(
         resume=resume,
         force=force,
         local_model_only=local_model_only,
+        skip_unavailable=skip_unavailable,
     )
     typer.echo(str(destination.resolve()))
 
@@ -64,6 +66,13 @@ def embed(
     ] = None,
     resume: Annotated[bool, typer.Option("--resume/--no-resume")] = True,
     force: Annotated[bool, typer.Option("--force")] = False,
+    skip_unavailable: Annotated[
+        bool,
+        typer.Option(
+            "--skip-unavailable/--require-all",
+            help="Skip missing or invalid curated CT series (default), or require every patient.",
+        ),
+    ] = True,
 ) -> None:
     """Encode selected CT ranges using an already cached and verified checkpoint."""
     _run(
@@ -76,6 +85,7 @@ def embed(
         patients,
         resume,
         force,
+        skip_unavailable,
         local_model_only=True,
     )
 
@@ -93,6 +103,13 @@ def run_pipeline(
     ] = None,
     resume: Annotated[bool, typer.Option("--resume/--no-resume")] = True,
     force: Annotated[bool, typer.Option("--force")] = False,
+    skip_unavailable: Annotated[
+        bool,
+        typer.Option(
+            "--skip-unavailable/--require-all",
+            help="Skip missing or invalid curated CT series (default), or require every patient.",
+        ),
+    ] = True,
 ) -> None:
     """Acquire the selected pinned checkpoint and encode selected CT ranges."""
     _run(
@@ -105,6 +122,7 @@ def run_pipeline(
         patients,
         resume,
         force,
+        skip_unavailable,
         local_model_only=False,
     )
 

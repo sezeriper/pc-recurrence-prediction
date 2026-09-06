@@ -66,6 +66,7 @@ class CurationReport:
     workbook_path: Path
     selection_path: Path
     patients: list[CuratedPatient]
+    allow_unselected: bool = True
 
     @property
     def failures(self) -> list[CuratedPatient]:
@@ -100,6 +101,7 @@ class CurationReport:
                 "copy_policy": "staged complete-set replacement with SHA-256 verification",
                 "idempotent": True,
                 "source_preserved": True,
+                "allow_unselected_without_ready_series": self.allow_unselected,
             },
             "totals": self.totals,
             "patients": [patient.to_dict() for patient in self.patients],
@@ -129,6 +131,8 @@ SUMMARY_COLUMNS = (
     "destination_dir",
 )
 
+UNAVAILABLE_SKIP_REASON = "no ready CT series was selected; skipped by allow_unselected policy"
+
 
 def _skipped_patient(
     row: ImageWorkbookRow,
@@ -153,6 +157,28 @@ def _skipped_patient(
         candidate_id=selection.candidate_id,
         study_uid=selection.key.study_uid,
         series_uid=selection.key.series_uid,
+    )
+
+
+def _unselected_patient(
+    row: ImageWorkbookRow,
+    *,
+    dicom_root: Path,
+    output_root: Path,
+) -> CuratedPatient:
+    folder = row.dicom_folder or ""
+    return CuratedPatient(
+        patient_id=row.patient_id,
+        row_number=row.row_number,
+        hasta_no=row.hasta_no,
+        dicom_folder=row.dicom_folder,
+        image_range_raw=row.image_range_raw,
+        status="skipped",
+        reason=UNAVAILABLE_SKIP_REASON,
+        source_dir=str((dicom_root / folder).resolve()),
+        destination_dir=str((output_root / folder).resolve()),
+        geometry_status=None,
+        geometry_reason=None,
     )
 
 
@@ -312,17 +338,28 @@ def curate_dataset(
     *,
     patients: set[str] | None = None,
     force: bool = False,
+    allow_unselected: bool = True,
 ) -> CurationReport:
     """Validate all explicit choices, then synchronize exact curated Series ranges."""
     workbook_rows = select_image_workbook_rows(load_image_workbook(workbook_path), patients)
-    selections = load_scan_selections(selection_path, dicom_root, workbook_path, patients=patients)
+    selections = load_scan_selections(
+        selection_path,
+        dicom_root,
+        workbook_path,
+        patients=patients,
+        allow_unselected=allow_unselected,
+    )
     report_patients = [
-        _curate_patient(
-            dicom_root,
-            output_root,
-            row,
-            selections[row.patient_id],
-            force=force,
+        (
+            _curate_patient(
+                dicom_root,
+                output_root,
+                row,
+                selections[row.patient_id],
+                force=force,
+            )
+            if row.patient_id in selections
+            else _unselected_patient(row, dicom_root=dicom_root, output_root=output_root)
         )
         for row in workbook_rows
     ]
@@ -332,6 +369,7 @@ def curate_dataset(
         workbook_path=workbook_path,
         selection_path=selection_path,
         patients=report_patients,
+        allow_unselected=allow_unselected,
     )
 
 
