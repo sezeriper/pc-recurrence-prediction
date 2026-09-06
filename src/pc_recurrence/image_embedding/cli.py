@@ -49,6 +49,7 @@ def _run(
         force=force,
         local_model_only=local_model_only,
         skip_unavailable=skip_unavailable,
+        progress=typer.echo,
     )
     typer.echo(str(destination.resolve()))
 

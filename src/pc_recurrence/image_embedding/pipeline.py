@@ -4,6 +4,7 @@ import json
 import shutil
 import time
 from collections import Counter
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -80,6 +81,15 @@ class CtSeriesDiscovery(list[CtSeriesCase]):
     def __init__(self, cases: list[CtSeriesCase], skipped: list[dict[str, Any]]) -> None:
         super().__init__(cases)
         self.skipped = skipped
+
+
+ProgressReporter = Callable[[str], None]
+
+
+def _report(progress: ProgressReporter | None, message: str) -> None:
+    """Send an immediately visible, user-oriented pipeline progress message."""
+    if progress is not None:
+        progress(f"[pc-image-embed] {message}")
 
 
 def _skipped_discovery_row(patient_id: str, reason: str) -> dict[str, str]:
@@ -326,7 +336,9 @@ def run_embedding(
     force: bool = False,
     local_model_only: bool = False,
     skip_unavailable: bool = True,
+    progress: ProgressReporter | None = None,
 ) -> Path:
+    _report(progress, f"Inspecting curated CT series in {dicom_root}.")
     discovery = (
         discover_ct_series_cases(
             dicom_root,
@@ -339,6 +351,16 @@ def run_embedding(
     )
     cases = list(discovery)
     discovery_failures = list(getattr(discovery, "skipped", []))
+    _report(
+        progress,
+        f"Found {len(cases)} eligible CT series; "
+        f"{len(discovery_failures)} patient(s) will be skipped.",
+    )
+    for failure in discovery_failures:
+        _report(
+            progress,
+            f"Skipping {failure['patient_id']}: {failure['reason']}.",
+        )
     destination = run_dir or create_run_directory(output_root / encoder_name.value)
     destination.mkdir(parents=True, exist_ok=True)
     state_dir = destination / ".state"
@@ -346,10 +368,21 @@ def run_embedding(
         shutil.rmtree(state_dir)
     state_dir.mkdir(exist_ok=True)
 
+    _report(
+        progress,
+        f"Acquiring the pinned {encoder_name.value.upper()} checkpoint "
+        "(downloads only when it is not already cached).",
+    )
     foundation_artifacts = acquire_foundation_model(
         encoder_name, model_cache, local_files_only=local_model_only
     )
+    _report(progress, "Checkpoint verified; loading the model and checking the runtime.")
     encoder, runtime = load_foundation_runtime(encoder_name, foundation_artifacts)
+    _report(
+        progress,
+        f"Model ready on {runtime.device_type}: {runtime.device_name} "
+        f"(startup check: {runtime.smoke_test_seconds:.1f}s).",
+    )
     model_fingerprint = ":".join(foundation_artifacts.hashes)
     model_manifest, feature_manifest, preprocessing_manifest, dimension = _foundation_manifest(
         encoder_name, foundation_artifacts
@@ -362,7 +395,10 @@ def run_embedding(
     records: list[dict[str, Any]] = rows.copy()
     failures: list[dict[str, Any]] = rows.copy()
     started_run = time.perf_counter()
-    for case in cases:
+    total_cases = len(cases)
+    for case_index, case in enumerate(cases, start=1):
+        progress_label = f"[{case_index}/{total_cases}] {case.patient_id}"
+        _report(progress, f"{progress_label}: loading the selected CT series.")
         volume = load_dicom_volume(
             case.patient_dir,
             patient_id=case.patient_id,
@@ -385,8 +421,14 @@ def run_embedding(
             completed.append(cached)
             rows.append(cached.summary)
             records.append(cached.record)
+            _report(
+                progress,
+                f"{progress_label}: reused the resumable cache "
+                f"({cached.summary['patch_count']} patches).",
+            )
             continue
         try:
+            _report(progress, f"{progress_label}: encoding.")
             encoded = _encode_foundation_case(
                 encoder, case, volume, ct_series_digest, encoder_name
             )
@@ -411,6 +453,11 @@ def run_embedding(
                 },
                 state_json,
             )
+            _report(
+                progress,
+                f"{progress_label}: complete — {encoded.summary['patch_count']} patches "
+                f"in {encoded.summary['inference_seconds']:.1f}s.",
+            )
         except Exception as error:
             failure = {
                 "patient_id": case.patient_id,
@@ -422,6 +469,7 @@ def run_embedding(
             rows.append(failure)
             records.append(failure)
             failures.append(failure)
+            _report(progress, f"{progress_label}: failed — {failure['reason']}.")
 
     if completed:
         patient_ids = np.asarray([item.patient_id for item in completed], dtype=np.str_)
@@ -468,6 +516,7 @@ def run_embedding(
     write_summary(rows, destination / "embedding_summary.csv", EMBEDDING_SUMMARY_COLUMNS)
     source_manifest = dicom_root / "curation_manifest.json"
     status_counts = dict(Counter(row["status"] for row in rows))
+    elapsed_seconds = time.perf_counter() - started_run
     write_json(
         {
             "pipeline_version": __version__,
@@ -488,7 +537,7 @@ def run_embedding(
             "status_counts": status_counts,
             "patients": records,
             "failures": failures,
-            "elapsed_seconds": time.perf_counter() - started_run,
+            "elapsed_seconds": elapsed_seconds,
             "artifacts": {
                 "patient_embeddings": "image_embeddings.npz",
                 "patch_embeddings": "patch_embeddings.npz",
@@ -497,5 +546,13 @@ def run_embedding(
             "provisional_research_output": True,
         },
         destination / "run_manifest.json",
+    )
+    _report(
+        progress,
+        "Finished: "
+        f"{len(completed)} embedded, "
+        f"{status_counts.get('skipped', 0)} skipped, "
+        f"{status_counts.get('failed', 0)} failed in {elapsed_seconds:.1f}s. "
+        f"Artifacts: {destination}",
     )
     return destination

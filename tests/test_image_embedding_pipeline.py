@@ -175,3 +175,24 @@ def test_selected_ct_cache_reuses_matching_series(tmp_path: Path, monkeypatch) -
     assert encode_calls == ["encoded"]
     state = json.loads(next((run_dir / ".state").glob("*.json")).read_text(encoding="utf-8"))
     assert state["ct_series_sha256"] == "C" * 64
+
+
+def test_embedding_reports_patient_progress(tmp_path: Path, monkeypatch) -> None:
+    dicom_root, workbook, _ = _selected_ct_source(tmp_path, monkeypatch)
+    _mock_runtime(tmp_path, monkeypatch, ImageEncoderName.SPECTRE, 1080)
+    messages: list[str] = []
+
+    pipeline.run_embedding(
+        dicom_root,
+        tmp_path / "outputs",
+        tmp_path / "models",
+        workbook_path=workbook,
+        encoder_name=ImageEncoderName.SPECTRE,
+        run_dir=tmp_path / "embedding_run",
+        progress=messages.append,
+    )
+
+    assert any("Found 1 eligible CT series" in message for message in messages)
+    assert any("[1/1] Patient 4: loading the selected CT series" in message for message in messages)
+    assert any("[1/1] Patient 4: complete" in message for message in messages)
+    assert any("Finished: 1 embedded, 0 skipped, 0 failed" in message for message in messages)
