@@ -102,6 +102,7 @@ def discover_ct_series_cases(
     patients: set[str] | None = None,
     *,
     skip_unavailable: bool = True,
+    progress: ProgressReporter | None = None,
 ) -> CtSeriesDiscovery:
     if not dicom_root.is_dir():
         raise ValueError(f"curated DICOM directory does not exist: {dicom_root}")
@@ -111,7 +112,12 @@ def discover_ct_series_cases(
     rows = select_image_workbook_rows(load_image_workbook(workbook_path), patients)
     cases: list[CtSeriesCase] = []
     skipped: list[dict[str, Any]] = []
-    for row in rows:
+    total_rows = len(rows)
+    for row_index, row in enumerate(rows, start=1):
+        _report(
+            progress,
+            f"Scanning curated CT series [{row_index}/{total_rows}]: {row.patient_id}.",
+        )
         if row.dicom_folder is None:
             reason = "workbook has no DICOM folder mapping"
             if skip_unavailable:
@@ -339,15 +345,12 @@ def run_embedding(
     progress: ProgressReporter | None = None,
 ) -> Path:
     _report(progress, f"Inspecting curated CT series in {dicom_root}.")
-    discovery = (
-        discover_ct_series_cases(
-            dicom_root,
-            workbook_path,
-            patients,
-            skip_unavailable=True,
-        )
-        if skip_unavailable
-        else discover_ct_series_cases(dicom_root, workbook_path, patients)
+    discovery = discover_ct_series_cases(
+        dicom_root,
+        workbook_path,
+        patients,
+        skip_unavailable=skip_unavailable,
+        progress=progress,
     )
     cases = list(discovery)
     discovery_failures = list(getattr(discovery, "skipped", []))

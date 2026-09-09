@@ -14,6 +14,8 @@ dependencies = [
 [project.scripts]
 pc-image-data = "pc_recurrence.image_data.cli:app"
 pc-image-embed = "pc_recurrence.image_embedding.cli:app"
+pc-clinical-data = "pc_recurrence.clinical_data.cli:app"
+pc-text-embed = "pc_recurrence.text_embedding.cli:app"
 pc-recurrence-classify = "pc_recurrence.recurrence_classifier.cli:app"
 
 [project.optional-dependencies]
@@ -26,6 +28,12 @@ imaging = [
   "scipy>=1.15,<2",
   "spectre-fm==0.2.1",
   "merlin-vlm==0.0.7",
+]
+text = [
+  "accelerate>=1.0,<2",
+  "huggingface-hub>=0.30,<1",
+  "safetensors>=0.4,<1",
+  "transformers>=4.51,<5",
 ]
 
 [dependency-groups]

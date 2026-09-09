@@ -147,6 +147,66 @@ Each run writes:
 - `embedding_summary.csv`: one audit row per selected CT range.
 - `run_manifest.json`: input/model hashes, preprocessing, pooling, runtime, and failures.
 
+## Clinical variables and CT report text
+
+Create patient-aligned clinical train and validation tables from the same source workbook:
+
+```shell
+uv run pc-clinical-data preprocess
+```
+
+The command writes a timestamped run under `outputs/clinical_features/`, including a split-labeled
+audit table `clinical_raw.csv`, separate `clinical_raw_train.csv`, `clinical_raw_validation.csv`,
+`clinical_features_train.csv`, and `clinical_features_validation.csv` tables plus
+`split_assignments.csv`. It creates a deterministic
+patient-level split (20% validation by default), fits z-score normalization, mean imputation, and
+categorical vocabularies on the training patients only, then applies those fitted parameters to
+the validation patients. The recurrence value is written separately as `target_recurrence`; the
+hospital number and CT slice range are excluded from the model features. A `CA 19-9` value such as
+`<2` uses the recorded upper bound as its numeric value and sets
+`ca_19_9_below_detection_limit=1`.
+
+Both raw and processed tables preserve each `BT raporu` value as `ct_report_text`. The
+split-specific raw training table is the authoritative cleaned input for later model fitting. The
+split-labeled `clinical_raw.csv` table is provided for cohort-wide audit only and must not be used
+to fit preprocessing. The processed tables are derived from the training-only preprocessing
+parameters and are safe to audit separately by split. CT report text is not yet a model feature:
+the preprocessing manifest marks text embedding as pending so a pinned text model can add report
+embeddings in a later stage. `preprocessing_parameters.json` records every training-fit mean, scale,
+missing-value policy, category vocabulary, and final feature column. `run_manifest.json` hashes the
+source workbook and every generated artifact.
+
+The default split seed is recorded in the manifest and can be changed with `--split-seed`. Use
+`--validation-fraction` to select another validation proportion. The optional `--fit-patients`
+argument can restrict fitting further to a subset of the generated training patients; validation
+patients can never be used to fit preprocessing. Categories unseen in the fit subset map to an
+explicit `unknown` column.
+
+## CT report embeddings
+
+Embed the `ct_report_text` documents from a completed clinical preprocessing run with the pinned
+[Qwen/Qwen3-Embedding-8B](https://huggingface.co/Qwen/Qwen3-Embedding-8B) snapshot:
+
+```shell
+uv sync --extra imaging --extra text --group dev
+uv run --extra text pc-text-embed run \
+  --clinical-run outputs/clinical_features/<clinical-run>
+```
+
+The stage verifies the clinical run manifest and the hashes of both split-specific raw tables before
+reading report text. It writes separate `text_embeddings_train.npz` and
+`text_embeddings_validation.npz` files with patient IDs and float32, L2-normalized 4,096-dimensional
+vectors. `embedding_summary.csv` contains one auditable row per patient without duplicating report
+text, and `run_manifest.json` records the fixed Hugging Face revision, config/tokenizer/index hashes,
+pooling, token limits, runtime, source split, and output hashes.
+
+Reports are embedded as documents without a retrieval instruction, using the model-card-recommended
+last-token pooling. The command uses an 8,192-token maximum and batch size 1 by default because the
+8B model has substantial memory requirements. Use `uv run --extra text pc-text-embed embed` instead
+of `run` when the pinned snapshot is already present in `.cache/text_models` and must not be
+downloaded. Missing report text is skipped by default and logged; `--require-all` turns it into an
+error.
+
 ## Recurrence classification
 
 `pc-recurrence-classify` trains independent affine recurrence heads over completed Merlin and

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -8,9 +9,17 @@ import numpy as np
 import pytest
 
 from pc_recurrence.image_data.dicom import DicomVolume
-from pc_recurrence.image_embedding import pipeline
+from pc_recurrence.image_embedding import foundation_models, pipeline
 from pc_recurrence.image_embedding.constants import ImageEncoderName
 from pc_recurrence.image_embedding.foundation_models import FoundationModelArtifacts, RuntimeInfo
+
+
+def test_spectre_uses_a_headless_matplotlib_backend(monkeypatch) -> None:
+    monkeypatch.setenv("MPLBACKEND", "module://matplotlib_inline.backend_inline")
+
+    foundation_models._configure_spectre_import_environment()
+
+    assert os.environ["MPLBACKEND"] == "Agg"
 
 
 def test_discovery_can_skip_missing_curated_patient_directories(
@@ -22,10 +31,12 @@ def test_discovery_can_skip_missing_curated_patient_directories(
     row = SimpleNamespace(patient_id="Patient without images", dicom_folder="PATIENT404")
     monkeypatch.setattr(pipeline, "load_image_workbook", lambda _path: [row])
     monkeypatch.setattr(pipeline, "select_image_workbook_rows", lambda rows, _patients: rows)
+    messages: list[str] = []
 
     discovery = pipeline.discover_ct_series_cases(
         dicom_root,
         tmp_path / "workbook.xlsx",
+        progress=messages.append,
     )
 
     assert discovery == []
@@ -35,6 +46,9 @@ def test_discovery_can_skip_missing_curated_patient_directories(
             "status": "skipped",
             "reason": "no curated CT series directory",
         }
+    ]
+    assert messages == [
+        "[pc-image-embed] Scanning curated CT series [1/1]: Patient without images."
     ]
 
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import time
 from collections import OrderedDict
 from dataclasses import dataclass
@@ -143,7 +144,13 @@ def _runtime_info(
     )
 
 
+def _configure_spectre_import_environment() -> None:
+    """Prevent a notebook-only Matplotlib backend leaking into the embedding CLI."""
+    os.environ["MPLBACKEND"] = "Agg"
+
+
 def _load_spectre(artifacts: FoundationModelArtifacts) -> torch.nn.Module:
+    _configure_spectre_import_environment()
     from spectre.model import SpectreImageFeatureExtractor
     from spectre.presets import get_preset
 
