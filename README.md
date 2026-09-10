@@ -2,9 +2,9 @@
 
 This repository implements the image modality of the pancreatic adenocarcinoma recurrence
 project: workbook-driven DICOM curation, frozen SPECTRE-Large and Merlin image embeddings, and
-independent recurrence classifiers. It reads each approved Turkish spreadsheet row's
-`Görüntü alanı` slice range, copies the selected slices into a curated folder, and encodes a crop
-centered on the complete selected CT range.
+independent recurrence classifiers. It reads the supplied `Radyoloji Data/10Patients_Important_Slices`
+workbook and the matching `IMG/CASE_*` folders, then encodes a crop centered on each supplied CT
+slice set.
 
 The included labels and splits are deliberately provisional pipeline-smoke inputs, not a
 scientific recurrence model or evaluation.
@@ -29,58 +29,24 @@ data and curated DICOMs are deliberately absent from Git.
 
 ## CT series curation
 
-Source DICOM and the workbook are read from `dataset/`, which remains read-only. Generated review
-and curated DICOM artifacts default to `outputs/`; no default command writes inside `dataset/`.
+By default, source DICOM and the workbook are read from
+`../Radyoloji Data/10Patients_Important_Slices/`, relative to the repository root. The supplied
+`IMG/CASE_*` folders have already been selected by radiology professionals. Curation copies their
+complete CT series into `outputs/dicom_selected`; no command writes into `Radyoloji Data/`.
 
-Create an operator review inventory:
-
-```shell
-uv run pc-image-data inventory
-```
-
-This CPU-only command scans the source recursively and writes
-`outputs/ct_series_review/scan_selection.csv` plus axial montages under
-`outputs/ct_series_review/previews/`. A DICOM Study groups an imaging encounter; a Series identifies
-one acquisition within that Study. Review the Study/Series descriptions, `status`, concrete
-`reason`, geometry warnings, and preview for every candidate.
-`ready` means the classic single-frame CT series can map the workbook's zero-based inclusive
-`Görüntü alanı` ordinals after ascending `InstanceNumber`. `not_selectable` candidates remain
-visible for audit, including unsupported dose-report objects. `no_series` identifies a missing
-folder or a folder without usable CT DICOM.
-
-Open the loopback-only montage reviewer:
-
-```shell
-uv run pc-image-data review
-```
-
-The reviewer keeps every patient and series in inventory order, shows the original montage at full
-resolution, and changes only `selected` cells when **Save selections** is pressed. It never chooses
-a series automatically. Partial progress and explicit clears are allowed; use `--selection FILE`
-for another inventory, `--port` for a different loopback port, or `--no-open-browser` to print the
-URL without launching a browser.
-
-![CT Series review web UI with patient status, selection controls, and axial montage previews](docs/review-ui.webp)
-
-Choose exactly one `ready` row per patient in the reviewer, or set `selected=yes` directly in the
-CSV and leave every other `selected` cell blank. Then curate:
+Curate the supplied cases directly:
 
 ```shell
 uv run pc-image-data preprocess
 ```
 
-Preprocessing validates the complete CSV against the live source before touching the curated
-output under `outputs/dicom_selected`. An added or removed series, changed SOP membership, changed
-file counts, or changed workbook range makes the selection stale and requires rerunning
-`inventory`. The chosen Study and Series is deduplicated by SOP Instance UID only when duplicate
-files are byte-identical. The workbook range is applied within that series, and the exact resulting
-file set atomically replaces any older curated range. Existing review work is protected unless
-`inventory --force` is used; that flag deliberately resets selections and previews.
-`preprocess --force` stages and rebuilds the exact selected output.
+Each source folder must contain exactly one processable CT series. The supplied files are retained
+in full and the workbook `Görüntü alanı` value is recorded as source metadata. Duplicated SOP
+instances are accepted only when their bytes match. The resulting file set atomically replaces any
+older curated output; `preprocess --force` stages and rebuilds it.
 
-Both commands accept `--patients "Patient 1,PATIENT853534"` with workbook IDs or DICOM folder
-aliases. Inventory and preprocessing then require choices only for that explicit subset. Use the
-same subset for both commands.
+Use `--patients "CASE_463046AE306C,CASE_7D0510FBD1DA"` to curate an explicit subset by workbook ID
+or DICOM-folder alias.
 
 Audit the curated series geometry without modifying it:
 
@@ -88,28 +54,15 @@ Audit the curated series geometry without modifying it:
 uv run pc-image-data inspect
 ```
 
-Preprocessing fails closed unless every targeted patient has one live `ready` choice. Geometry
-gaps and duplicate slice positions are warnings rather than selection blockers. Study UID, Series
-UID, selected SOP Instance UIDs, and geometry warnings remain in the curation and inspection
-manifests.
-
-If a workbook row has no `ready` CT series (for example, no usable images), preprocessing retains
-it as an audited skip and continues curating the rest of the cohort by default:
-
-```shell
-uv run pc-image-data preprocess
-```
-
-This only permits an unselected patient that has no live `ready` candidate. It still fails
-for an omitted selection where a ready candidate exists, or for a selected-series curation error.
-The resulting manifest records the skipped patient. Embedding also skips missing or invalid
-curated patient folders by default and records them in the embedding summary and run manifest. Use
-`--require-all` with either command to restore the former strict all-patients-must-be-valid gate.
+Missing, invalid, or ambiguous folders are recorded as audited skips by default. Use
+`--require-all` to return a non-zero exit when any targeted case is skipped. Geometry gaps and
+duplicate slice positions are warnings; Study UID, Series UID, selected SOP Instance UIDs, and
+geometry warnings remain in the curation and inspection manifests.
 
 ## Image embeddings
 
 The `pc-image-embed` pipeline consumes the curated DICOM folders produced by
-`pc-image-data preprocess`. It loads each workbook-selected CT series range directly. Select a
+`pc-image-data preprocess`. It loads each professionally selected CT series directly. Select a
 backend with `--encoder spectre|merlin`:
 
 ```shell
@@ -210,8 +163,9 @@ error.
 ## Recurrence classification
 
 `pc-recurrence-classify` trains independent affine recurrence heads over completed Merlin and
-SPECTRE patient-embedding runs. The workbook `nüks` value `yok` (trimmed and case-insensitive) is
-the negative class; every other populated value is positive. Training joins patients by workbook
+SPECTRE patient-embedding runs. The supplied workbook's `Nüks Binary` value maps directly from
+`0` (negative) and `1` (positive). Legacy workbooks retain their `nüks` handling, where `yok`
+(trimmed and case-insensitive) is the negative class. Training joins patients by workbook
 patient ID, verifies that both encoders used the same selected CT series provenance, and uses one
 shared holdout split without combining the encoder features.
 

@@ -1,1 +1,1 @@
-"""CT-series inventory, curation, and loading utilities."""
+"""CT-series curation and loading utilities."""

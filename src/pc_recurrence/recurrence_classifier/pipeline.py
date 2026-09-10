@@ -80,8 +80,14 @@ def parse_recurrence_label(value: Any, *, patient_id: str) -> int:
     """Map workbook recurrence values to binary targets."""
     if value is None or (isinstance(value, str) and not value.strip()):
         raise ValueError(f"Patient {patient_id!r} has a blank recurrence label")
-    if isinstance(value, str) and value.strip().casefold() == "yok":
+    if isinstance(value, (int, float, np.number)) and not isinstance(value, bool):
+        if value in (0, 1):
+            return int(value)
+        raise ValueError(f"Patient {patient_id!r} has invalid binary recurrence label {value!r}")
+    if isinstance(value, str) and value.strip().casefold() in {"yok", "0"}:
         return 0
+    if isinstance(value, str) and value.strip() == "1":
+        return 1
     return 1
 
 

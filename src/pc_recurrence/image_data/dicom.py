@@ -140,6 +140,12 @@ def discover_dicom_series(patient_dir: Path) -> SeriesDiscovery:
         duplicate_count = 0
         problems: list[str] = []
         for sop_uid, copies in by_sop.items():
+            copies.sort(
+                key=lambda item: (
+                    -len(item[0].relative_to(patient_dir).parts),
+                    item[0].relative_to(patient_dir).as_posix(),
+                )
+            )
             retained.append(copies[0])
             if len(copies) == 1:
                 continue
@@ -163,7 +169,10 @@ def discover_dicom_series(patient_dir: Path) -> SeriesDiscovery:
             problems.append("Series contains multiple SOPClassUID values")
         source_directories = tuple(
             sorted(
-                {str(path.parent.relative_to(patient_dir)) or "." for path, _ in source_headers},
+                {
+                    path.parent.relative_to(patient_dir).as_posix() or "."
+                    for path, _ in source_headers
+                },
                 key=natural_patient_key,
             )
         )

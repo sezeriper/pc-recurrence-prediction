@@ -6,7 +6,7 @@ from typing import Any
 
 from openpyxl import load_workbook
 
-from pc_recurrence.image_data.workbook import EXPECTED_HEADERS
+from pc_recurrence.image_data.workbook import EXPECTED_HEADERS, IMPORTANT_SLICES_HEADERS
 
 
 @dataclass(frozen=True)
@@ -61,15 +61,17 @@ def load_clinical_workbook(
         if sheet_name not in workbook.sheetnames:
             raise ValueError(f"Expected worksheet {sheet_name!r}; found {workbook.sheetnames}")
         sheet = workbook[sheet_name]
-        raw_rows = sheet.iter_rows(min_col=1, max_col=len(EXPECTED_HEADERS), values_only=True)
+        raw_rows = sheet.iter_rows(values_only=True)
         raw_headers = next(raw_rows, None)
         if raw_headers is None:
             raise ValueError("Workbook is empty")
         headers = tuple(str(value).strip() if value is not None else "" for value in raw_headers)
-        if headers != EXPECTED_HEADERS:
+        if headers not in (EXPECTED_HEADERS, IMPORTANT_SLICES_HEADERS):
             raise ValueError(
-                f"Unexpected workbook schema. Expected {EXPECTED_HEADERS}; found {headers}"
+                "Unexpected workbook schema. Expected either "
+                f"{EXPECTED_HEADERS} or {IMPORTANT_SLICES_HEADERS}; found {headers}"
             )
+        is_important_slices_schema = headers == IMPORTANT_SLICES_HEADERS
 
         records: list[ClinicalWorkbookRow] = []
         seen_ids: set[str] = set()
@@ -87,22 +89,22 @@ def load_clinical_workbook(
                 ClinicalWorkbookRow(
                     patient_id=patient_id,
                     row_number=row_number,
-                    hospital_number=cleaned[1],
-                    surgery=cleaned[2],
-                    pathology=cleaned[3],
-                    recurrence_raw=cleaned[4],
-                    age=cleaned[5],
-                    ca_19_9=cleaned[6],
-                    total_bilirubin=cleaned[7],
-                    direct_bilirubin=cleaned[8],
-                    symptom=cleaned[9],
-                    serum_albumin=cleaned[10],
-                    absolute_lymphocyte=cleaned[11],
-                    crp=cleaned[12],
-                    cally=cleaned[13],
-                    pni=cleaned[14],
-                    image_range=cleaned[15],
-                    ct_report=cleaned[16],
+                    hospital_number=None if is_important_slices_schema else cleaned[1],
+                    surgery=None if is_important_slices_schema else cleaned[2],
+                    pathology=None if is_important_slices_schema else cleaned[3],
+                    recurrence_raw=cleaned[1 if is_important_slices_schema else 4],
+                    age=cleaned[2 if is_important_slices_schema else 5],
+                    ca_19_9=cleaned[3 if is_important_slices_schema else 6],
+                    total_bilirubin=cleaned[4 if is_important_slices_schema else 7],
+                    direct_bilirubin=cleaned[5 if is_important_slices_schema else 8],
+                    symptom=cleaned[6 if is_important_slices_schema else 9],
+                    serum_albumin=cleaned[7 if is_important_slices_schema else 10],
+                    absolute_lymphocyte=cleaned[8 if is_important_slices_schema else 11],
+                    crp=cleaned[9 if is_important_slices_schema else 12],
+                    cally=cleaned[10 if is_important_slices_schema else 13],
+                    pni=cleaned[11 if is_important_slices_schema else 14],
+                    image_range=cleaned[12 if is_important_slices_schema else 15],
+                    ct_report=cleaned[13 if is_important_slices_schema else 16],
                 )
             )
     finally:

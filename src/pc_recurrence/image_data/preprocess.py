@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import shutil
 import uuid
@@ -11,8 +12,14 @@ from typing import Any
 from pc_recurrence import __version__
 from pc_recurrence.io import sha256_file
 
-from .dicom import DicomGeometryError, discover_dicom_series, inspect_patient, select_series_files
-from .scan_selection import PatientSeriesSelection, load_scan_selections, series_sop_uids_sha256
+from .dicom import (
+    CT_IMAGE_STORAGE_UID,
+    DicomGeometryError,
+    DicomSeries,
+    discover_dicom_series,
+    inspect_patient,
+    select_series_files,
+)
 from .workbook import ImageWorkbookRow, load_image_workbook, select_image_workbook_rows
 
 
@@ -40,7 +47,6 @@ class CuratedPatient:
     destination_dir: str | None
     geometry_status: str | None
     geometry_reason: str | None
-    candidate_id: str | None = None
     study_uid: str | None = None
     series_uid: str | None = None
     series_sop_uids_sha256: str | None = None
@@ -52,6 +58,7 @@ class CuratedPatient:
     selected_instance_numbers: list[int] = field(default_factory=list)
     selected_sop_instance_uids: list[str] = field(default_factory=list)
     files: list[CuratedFile] = field(default_factory=list)
+    slices_are_preselected: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         data = self.__dict__.copy()
@@ -64,9 +71,7 @@ class CurationReport:
     dicom_root: Path
     output_root: Path
     workbook_path: Path
-    selection_path: Path
     patients: list[CuratedPatient]
-    allow_unselected: bool = True
 
     @property
     def failures(self) -> list[CuratedPatient]:
@@ -92,16 +97,17 @@ class CurationReport:
             "output_root": str(self.output_root.resolve()),
             "workbook": str(self.workbook_path.resolve()),
             "workbook_sha256": sha256_file(self.workbook_path),
-            "selection_path": str(self.selection_path.resolve()),
-            "selection_sha256": sha256_file(self.selection_path),
             "policy": {
-                "series_selection": "exact StudyInstanceUID and SeriesInstanceUID",
+                "series_selection": "one processable CT Series per professionally curated folder",
                 "duplicate_policy": "byte-identical SOPInstanceUID copies collapse to one file",
-                "indexing": "zero-based inclusive ordinals after ascending DICOM InstanceNumber",
+                "indexing": (
+                    "preselected source slices retained in full"
+                    if any(row.slices_are_preselected for row in self.patients)
+                    else "zero-based inclusive ordinals after ascending DICOM InstanceNumber"
+                ),
                 "copy_policy": "staged complete-set replacement with SHA-256 verification",
                 "idempotent": True,
                 "source_preserved": True,
-                "allow_unselected_without_ready_series": self.allow_unselected,
             },
             "totals": self.totals,
             "patients": [patient.to_dict() for patient in self.patients],
@@ -114,7 +120,6 @@ SUMMARY_COLUMNS = (
     "row_number",
     "hasta_no",
     "dicom_folder",
-    "candidate_id",
     "study_uid",
     "series_uid",
     "series_sop_uids_sha256",
@@ -131,12 +136,14 @@ SUMMARY_COLUMNS = (
     "destination_dir",
 )
 
-UNAVAILABLE_SKIP_REASON = "no ready CT series was selected; skipped by allow_unselected policy"
+
+def _series_sop_uids_sha256(series: DicomSeries) -> str:
+    values = sorted(str(dataset.SOPInstanceUID) for _, dataset in series.headers)
+    return hashlib.sha256("\n".join(values).encode()).hexdigest()
 
 
 def _skipped_patient(
     row: ImageWorkbookRow,
-    selection: PatientSeriesSelection,
     *,
     reason: str,
     source_dir: Path,
@@ -148,71 +155,41 @@ def _skipped_patient(
         hasta_no=row.hasta_no,
         dicom_folder=row.dicom_folder,
         image_range_raw=row.image_range_raw,
+        slices_are_preselected=row.slices_are_preselected,
         status="skipped",
         reason=reason,
         source_dir=str(source_dir.resolve()),
         destination_dir=str(destination_dir.resolve()),
         geometry_status=None,
         geometry_reason=None,
-        candidate_id=selection.candidate_id,
-        study_uid=selection.key.study_uid,
-        series_uid=selection.key.series_uid,
     )
 
 
-def _unselected_patient(
-    row: ImageWorkbookRow,
-    *,
-    dicom_root: Path,
-    output_root: Path,
-) -> CuratedPatient:
-    folder = row.dicom_folder or ""
-    return CuratedPatient(
-        patient_id=row.patient_id,
-        row_number=row.row_number,
-        hasta_no=row.hasta_no,
-        dicom_folder=row.dicom_folder,
-        image_range_raw=row.image_range_raw,
-        status="skipped",
-        reason=UNAVAILABLE_SKIP_REASON,
-        source_dir=str((dicom_root / folder).resolve()),
-        destination_dir=str((output_root / folder).resolve()),
-        geometry_status=None,
-        geometry_reason=None,
-    )
+def _processable_series(source_dir: Path) -> list[DicomSeries]:
+    return [
+        series
+        for series in discover_dicom_series(source_dir).series
+        if series.sop_class_uid == CT_IMAGE_STORAGE_UID and not series.problems
+    ]
 
 
 def _curate_patient(
-    dicom_root: Path,
     output_root: Path,
     row: ImageWorkbookRow,
-    selection: PatientSeriesSelection,
+    source_dir: Path,
+    series: DicomSeries,
     *,
     force: bool,
 ) -> CuratedPatient:
-    source_dir = dicom_root / selection.dicom_folder
-    destination_dir = output_root / selection.dicom_folder
+    folder = row.dicom_folder or ""
+    destination_dir = output_root / folder
     try:
-        series = next(
-            item
-            for item in discover_dicom_series(source_dir).series
-            if item.key == selection.key
-        )
         files, instance_numbers, sop_uids = select_series_files(
-            source_dir, selection.key, row.image_range_raw
-        )
-    except StopIteration:
-        return _skipped_patient(
-            row,
-            selection,
-            reason="selected CT DICOM Series not found in source directory",
-            source_dir=source_dir,
-            destination_dir=destination_dir,
+            source_dir, series.key, row.selection_range_raw
         )
     except DicomGeometryError as exc:
         return _skipped_patient(
             row,
-            selection,
             reason=str(exc),
             source_dir=source_dir,
             destination_dir=destination_dir,
@@ -221,7 +198,6 @@ def _curate_patient(
     if len(basenames) != len(set(basenames)):
         return _skipped_patient(
             row,
-            selection,
             reason="duplicate destination basenames in selected files",
             source_dir=source_dir,
             destination_dir=destination_dir,
@@ -252,8 +228,8 @@ def _curate_patient(
         unchanged_count = len(files)
     else:
         output_root.mkdir(parents=True, exist_ok=True)
-        staging_dir = output_root / f".{selection.dicom_folder}.staging-{uuid.uuid4().hex}"
-        backup_dir = output_root / f".{selection.dicom_folder}.backup-{uuid.uuid4().hex}"
+        staging_dir = output_root / f".{folder}.staging-{uuid.uuid4().hex}"
+        backup_dir = output_root / f".{folder}.backup-{uuid.uuid4().hex}"
         replacement = destination_dir.exists()
         curated_files = []
         try:
@@ -292,7 +268,6 @@ def _curate_patient(
                 backup_dir.replace(destination_dir)
             return _skipped_patient(
                 row,
-                selection,
                 reason=f"{type(exc).__name__}: {exc}",
                 source_dir=source_dir,
                 destination_dir=destination_dir,
@@ -300,25 +275,23 @@ def _curate_patient(
         copied_count = len(files)
         unchanged_count = 0
 
-    inspection = inspect_patient(
-        destination_dir, patient_id=row.patient_id, selection=selection.key
-    )
+    inspection = inspect_patient(destination_dir, patient_id=row.patient_id, selection=series.key)
     return CuratedPatient(
         patient_id=row.patient_id,
         row_number=row.row_number,
         hasta_no=row.hasta_no,
         dicom_folder=row.dicom_folder,
         image_range_raw=row.image_range_raw,
+        slices_are_preselected=row.slices_are_preselected,
         status="copied",
         reason=None,
         source_dir=str(source_dir.resolve()),
         destination_dir=str(destination_dir.resolve()),
         geometry_status=inspection.geometry_status,
         geometry_reason=inspection.reason,
-        candidate_id=selection.candidate_id,
-        study_uid=selection.key.study_uid,
-        series_uid=selection.key.series_uid,
-        series_sop_uids_sha256=series_sop_uids_sha256(series),
+        study_uid=series.key.study_uid,
+        series_uid=series.key.series_uid,
+        series_sop_uids_sha256=_series_sop_uids_sha256(series),
         source_file_count=series.source_file_count,
         duplicate_file_count=series.duplicate_file_count,
         selected_file_count=len(files),
@@ -330,63 +303,71 @@ def _curate_patient(
     )
 
 
+def _curate_row(
+    dicom_root: Path,
+    output_root: Path,
+    row: ImageWorkbookRow,
+    *,
+    force: bool,
+) -> CuratedPatient:
+    folder = row.dicom_folder or ""
+    source_dir = dicom_root / folder
+    destination_dir = output_root / folder
+    if not folder or not source_dir.is_dir():
+        return _skipped_patient(
+            row,
+            reason="professionally curated CT folder is missing",
+            source_dir=source_dir,
+            destination_dir=destination_dir,
+        )
+    series = _processable_series(source_dir)
+    if len(series) != 1:
+        reason = (
+            "no processable CT DICOM Series found"
+            if not series
+            else f"expected one processable CT DICOM Series; found {len(series)}"
+        )
+        return _skipped_patient(
+            row,
+            reason=reason,
+            source_dir=source_dir,
+            destination_dir=destination_dir,
+        )
+    return _curate_patient(output_root, row, source_dir, series[0], force=force)
+
+
 def curate_dataset(
     dicom_root: Path,
     output_root: Path,
     workbook_path: Path,
-    selection_path: Path,
     *,
     patients: set[str] | None = None,
     force: bool = False,
-    allow_unselected: bool = True,
 ) -> CurationReport:
-    """Validate all explicit choices, then synchronize exact curated Series ranges."""
+    """Synchronize one professionally selected CT Series per workbook case."""
     workbook_rows = select_image_workbook_rows(load_image_workbook(workbook_path), patients)
-    selections = load_scan_selections(
-        selection_path,
-        dicom_root,
-        workbook_path,
-        patients=patients,
-        allow_unselected=allow_unselected,
-    )
     report_patients = [
-        (
-            _curate_patient(
-                dicom_root,
-                output_root,
-                row,
-                selections[row.patient_id],
-                force=force,
-            )
-            if row.patient_id in selections
-            else _unselected_patient(row, dicom_root=dicom_root, output_root=output_root)
-        )
-        for row in workbook_rows
+        _curate_row(dicom_root, output_root, row, force=force) for row in workbook_rows
     ]
     return CurationReport(
         dicom_root=dicom_root,
         output_root=output_root,
         workbook_path=workbook_path,
-        selection_path=selection_path,
         patients=report_patients,
-        allow_unselected=allow_unselected,
     )
 
 
 def write_curation_report(report: CurationReport) -> tuple[Path, Path]:
     report.output_root.mkdir(parents=True, exist_ok=True)
     summary_path = report.output_root / "curation_summary.csv"
-    temporary_summary = summary_path.with_suffix(summary_path.suffix + ".tmp")
+    manifest_path = report.output_root / "curation_manifest.json"
+    temporary_summary = summary_path.with_suffix(".csv.tmp")
     with temporary_summary.open("w", encoding="utf-8-sig", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=SUMMARY_COLUMNS, extrasaction="ignore")
         writer.writeheader()
-        for patient in report.patients:
-            writer.writerow({column: getattr(patient, column) for column in SUMMARY_COLUMNS})
+        writer.writerows(patient.to_dict() for patient in report.patients)
     temporary_summary.replace(summary_path)
-    manifest_path = report.output_root / "curation_manifest.json"
-    temporary = manifest_path.with_suffix(manifest_path.suffix + ".tmp")
-    temporary.write_text(
+    manifest_path.write_text(
         json.dumps(report.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8"
     )
-    temporary.replace(manifest_path)
     return summary_path, manifest_path

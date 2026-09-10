@@ -26,6 +26,23 @@ EXPECTED_HEADERS: tuple[str, ...] = (
     "BT raporu",
 )
 
+IMPORTANT_SLICES_HEADERS: tuple[str, ...] = (
+    "Case",
+    "Nüks Binary",
+    "yaş",
+    "CA 19-9",
+    "total bilirubin",
+    "direkt bilirubin",
+    "semptom",
+    "serum albumin",
+    "mutlak lenfosit",
+    "CRP",
+    "CALLY",
+    "PNI",
+    "Görüntü alanı",
+    "BT raporu",
+)
+
 
 @dataclass(frozen=True)
 class ImageWorkbookRow:
@@ -35,6 +52,12 @@ class ImageWorkbookRow:
     dicom_folder: str | None
     image_range_raw: str | None
     recurrence_raw: Any
+    slices_are_preselected: bool = False
+
+    @property
+    def selection_range_raw(self) -> str | None:
+        """Return a range only when it must be applied to the DICOM series."""
+        return None if self.slices_are_preselected else self.image_range_raw
 
 
 def _clean_scalar(value: Any) -> Any:
@@ -55,6 +78,12 @@ def _dicom_folder(hasta_no: Any) -> str | None:
     return f"PATIENT{text}" if text else None
 
 
+def _headers(values: tuple[Any, ...] | None) -> tuple[str, ...]:
+    if values is None:
+        return ()
+    return tuple(str(value).strip() if value is not None else "" for value in values)
+
+
 def load_image_workbook(
     workbook_path: str | Path, sheet_name: str = "Sayfa1"
 ) -> list[ImageWorkbookRow]:
@@ -67,15 +96,17 @@ def load_image_workbook(
         if sheet_name not in workbook.sheetnames:
             raise ValueError(f"Expected worksheet {sheet_name!r}; found {workbook.sheetnames}")
         sheet = workbook[sheet_name]
-        rows = sheet.iter_rows(min_col=1, max_col=len(EXPECTED_HEADERS), values_only=True)
+        rows = sheet.iter_rows(values_only=True)
         raw_headers = next(rows, None)
         if raw_headers is None:
             raise ValueError("Workbook is empty")
-        headers = tuple(str(value).strip() if value is not None else "" for value in raw_headers)
-        if headers != EXPECTED_HEADERS:
+        headers = _headers(raw_headers)
+        if headers not in (EXPECTED_HEADERS, IMPORTANT_SLICES_HEADERS):
             raise ValueError(
-                f"Unexpected workbook schema. Expected {EXPECTED_HEADERS}; found {headers}"
+                "Unexpected workbook schema. Expected either "
+                f"{EXPECTED_HEADERS} or {IMPORTANT_SLICES_HEADERS}; found {headers}"
             )
+        is_important_slices_schema = headers == IMPORTANT_SLICES_HEADERS
 
         records: list[ImageWorkbookRow] = []
         seen_ids: set[str] = set()
@@ -89,15 +120,22 @@ def load_image_workbook(
                 raise ValueError(f"Duplicate patient ID {patient_id!r} at row {row_number}")
             seen_ids.add(patient_id)
 
-            hasta_no = _clean_scalar(raw_row[1])
+            hasta_no = None if is_important_slices_schema else _clean_scalar(raw_row[1])
             records.append(
                 ImageWorkbookRow(
                     patient_id=patient_id,
                     row_number=row_number,
                     hasta_no=hasta_no,
-                    dicom_folder=_dicom_folder(hasta_no),
-                    image_range_raw=_clean_scalar(raw_row[15]),
-                    recurrence_raw=_clean_scalar(raw_row[4]),
+                    dicom_folder=(
+                        patient_id if is_important_slices_schema else _dicom_folder(hasta_no)
+                    ),
+                    image_range_raw=_clean_scalar(
+                        raw_row[12 if is_important_slices_schema else 15]
+                    ),
+                    recurrence_raw=_clean_scalar(
+                        raw_row[1 if is_important_slices_schema else 4]
+                    ),
+                    slices_are_preselected=is_important_slices_schema,
                 )
             )
     finally:
